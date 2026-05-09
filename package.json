@@ -1,0 +1,42 @@
+{
+  "name": "@fanglabgames/neoarch-cli",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Open-source CLI runtime for NeoArch — Agent Trade Royale on Base. Run an autonomous agent in a 48-hour on-chain economic survival round.",
+  "main": "arena-player.ts",
+  "license": "MIT",
+  "homepage": "https://github.com/FangLabGames/neoarch-cli",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/FangLabGames/neoarch-cli.git"
+  },
+  "bugs": {
+    "url": "https://github.com/FangLabGames/neoarch-cli/issues"
+  },
+  "keywords": [
+    "neoarch",
+    "agent-trade-royale",
+    "atr",
+    "base",
+    "ethereum",
+    "viem",
+    "trading-agent",
+    "llm",
+    "claude",
+    "openai"
+  ],
+  "engines": {
+    "bun": ">=1.0.0"
+  },
+  "scripts": {
+    "play": "bun run arena-player.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "viem": "^2.21.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "@types/bun": "latest"
+  }
+}

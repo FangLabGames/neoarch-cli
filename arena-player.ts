@@ -1,0 +1,405 @@
+#!/usr/bin/env bun
+/**
+ * NeoArch Arena Player CLI — open-source Path A runtime.
+ *
+ * Joins an Agent Trade Royale round with your wallet and plays autonomously
+ * for 48 hours (576 ticks @ 5 min each). Signs commit/reveal locally; private
+ * key never leaves your machine.
+ *
+ * Usage:
+ *   export AGENT_PK=0x<your-private-key>
+ *   export ROUND_ADDRESS=0x<round-contract-address>
+ *   export LLM_API_KEY=sk-ant-...           # optional — heuristic only if unset
+ *   bun run arena-player.ts --strategy balanced
+ *   bun run arena-player.ts --llm anthropic --prompt ./my-strategy.md
+ *
+ * See README.md for full flag list, security notes, and link to skills.md.
+ */
+
+import { readFileSync } from "node:fs";
+import {
+  createPublicClient,
+  createWalletClient,
+  http,
+  keccak256,
+  toHex,
+  formatEther,
+  type Address,
+  type Hex,
+} from "viem";
+import { privateKeyToAccount } from "viem/accounts";
+import { base } from "viem/chains";
+
+import {
+  atrRoundAbi,
+  tongAbi,
+  TICK_DURATION_SEC,
+  COMMIT_WINDOW_SEC,
+  STARVATION_STEPS,
+  ENTRY_FEE_TONG,
+  ROUND_STATUS,
+  HOSTING_MODE_LOCAL_CLI,
+} from "./src/abi.ts";
+import {
+  type AgentAction,
+  computeCommitment,
+  generateSalt,
+  submitCommit,
+  submitReveal,
+  submitClaimPrize,
+} from "./src/commit-reveal.ts";
+import {
+  type AgentSnapshot,
+  type Strategy,
+  heuristicAction,
+  validateAndClamp,
+} from "./src/strategy.ts";
+import { LlmClient, type Provider, formatSpend } from "./src/llm.ts";
+
+// ─── Pretty logging ─────────────────────────────────────────────────
+const C = {
+  reset: "\x1b[0m", dim: "\x1b[2m", bold: "\x1b[1m",
+  red: "\x1b[31m", green: "\x1b[32m", yellow: "\x1b[33m", cyan: "\x1b[36m",
+};
+const ts = () => new Date().toLocaleTimeString("en-US", { hour12: false });
+const log = (msg: string) => process.stdout.write(`${C.dim}${ts()}${C.reset} ${msg}\n`);
+function fatal(msg: string): never {
+  process.stderr.write(`${C.red}ERROR: ${msg}${C.reset}\n`);
+  process.exit(1);
+}
+
+// ─── Arg parsing ────────────────────────────────────────────────────
+const argv = process.argv.slice(2);
+const flag = (name: string, def = ""): string => {
+  const i = argv.indexOf(`--${name}`);
+  return i >= 0 && argv[i + 1] ? argv[i + 1] : def;
+};
+const has = (name: string): boolean => argv.includes(`--${name}`);
+
+const AGENT_PK = (process.env.AGENT_PK ?? "") as Hex;
+const ROUND_ADDRESS = (process.env.ROUND_ADDRESS ?? flag("round")) as Address;
+const RPC = flag("rpc", process.env.RPC ?? "https://mainnet.base.org");
+const STRATEGY = flag("strategy", "balanced") as Strategy;
+const LLM_PROVIDER = flag("llm", process.env.LLM_PROVIDER ?? "") as Provider | "";
+const LLM_MODEL = flag("model", process.env.LLM_MODEL ?? "");
+const LLM_BASE_URL = flag("base-url", process.env.LLM_BASE_URL ?? "");
+const LLM_API_KEY = process.env.LLM_API_KEY ?? "";
+const PROMPT_PATH = flag("prompt", process.env.PROMPT_PATH ?? "");
+const CAP_USD = Number(flag("cap-usd", process.env.CAP_USD ?? "5"));
+const SKIP_JOIN = has("no-join");
+const DRY_RUN = has("dry-run");
+
+if (!AGENT_PK || !AGENT_PK.startsWith("0x") || AGENT_PK.length !== 66) {
+  fatal("set AGENT_PK=0x<64-hex-chars> in env (your wallet private key — never sent anywhere)");
+}
+if (!ROUND_ADDRESS || !ROUND_ADDRESS.startsWith("0x") || ROUND_ADDRESS.length !== 42) {
+  fatal("set ROUND_ADDRESS=0x<40-hex-chars> in env or pass --round 0x... (find on neoarch.xyz/arena)");
+}
+if (!["payload", "balanced", "craft"].includes(STRATEGY)) {
+  fatal(`unknown --strategy "${STRATEGY}" — must be one of: payload, balanced, craft`);
+}
+
+// ─── Clients ────────────────────────────────────────────────────────
+const account = privateKeyToAccount(AGENT_PK);
+const publicClient = createPublicClient({ chain: base, transport: http(RPC) });
+const walletClient = createWalletClient({ account, chain: base, transport: http(RPC) });
+
+// ─── LLM (optional) ─────────────────────────────────────────────────
+let userStrategyPrompt = "";
+if (PROMPT_PATH) {
+  try {
+    userStrategyPrompt = readFileSync(PROMPT_PATH, "utf8");
+  } catch (e: any) {
+    fatal(`couldn't read --prompt file ${PROMPT_PATH}: ${e?.message ?? e}`);
+  }
+}
+
+const llm: LlmClient | null =
+  LLM_PROVIDER && LLM_API_KEY
+    ? new LlmClient({
+        provider: LLM_PROVIDER as Provider,
+        apiKey: LLM_API_KEY,
+        model: LLM_MODEL || undefined,
+        baseUrl: LLM_BASE_URL || undefined,
+        capUsdMicro: Math.round(CAP_USD * 1_000_000),
+        systemPrompt: userStrategyPrompt,
+      })
+    : null;
+
+// ─── Banner ─────────────────────────────────────────────────────────
+log(`${C.cyan}NeoArch Arena Player${C.reset} v0.1.0`);
+log(`  agent:    ${C.bold}${account.address}${C.reset}`);
+log(`  round:    ${ROUND_ADDRESS}`);
+log(`  rpc:      ${RPC}`);
+log(`  brain:    ${llm ? `${C.green}LLM${C.reset} (${LLM_PROVIDER}, cap=$${CAP_USD}/round)` : `heuristic ${C.bold}${STRATEGY}${C.reset}`}`);
+if (DRY_RUN) log(`  mode:     ${C.yellow}DRY-RUN${C.reset} (no transactions sent)`);
+
+// ─── State machine ──────────────────────────────────────────────────
+interface PendingReveal {
+  tick: number;
+  action: AgentAction;
+  salt: Hex;
+}
+let pending: PendingReveal | null = null;
+let lastSeenTick = -1n;
+
+// ─── Strategy commitment ────────────────────────────────────────────
+/// Compute the strategyHash committed at joinRound. Hashes the canonical
+/// representation of what this agent is locked into for the entire round.
+/// LLM mode: hash the system prompt + user prompt. Heuristic mode: hash the
+/// preset name + version. The on-chain bytes32 is just a commitment — the
+/// contract doesn't introspect it; it's there so spectators/researchers can
+/// later verify you didn't swap strategies mid-round.
+function computeStrategyHash(): Hex {
+  if (llm) {
+    const provider = LLM_PROVIDER || "anthropic";
+    const model = LLM_MODEL || "default";
+    const body = `llm|${provider}|${model}|${userStrategyPrompt.trim()}`;
+    return keccak256(toHex(body));
+  }
+  return keccak256(toHex(`heuristic|${STRATEGY}|v1`));
+}
+
+// ─── Snapshot reader ────────────────────────────────────────────────
+async function readSnapshot(): Promise<AgentSnapshot> {
+  const result = (await publicClient.readContract({
+    address: ROUND_ADDRESS,
+    abi: atrRoundAbi,
+    functionName: "agents",
+    args: [account.address],
+  })) as readonly [
+    boolean, bigint, bigint, bigint, number, bigint, bigint, number, bigint, bigint, number, Hex, number,
+  ];
+  return {
+    alive: result[0],
+    payload: result[1],
+    tong: result[2],
+    alphaBalance: result[3],
+    moduleTier: result[4],
+    moduleDurability: result[5],
+    throughputCap: result[6],
+    missCount: result[7],
+  };
+}
+
+async function readTiming(): Promise<{ status: number; tick: bigint; lastTs: bigint }> {
+  const [status, tick, lastTs] = (await Promise.all([
+    publicClient.readContract({ address: ROUND_ADDRESS, abi: atrRoundAbi, functionName: "roundStatus" }),
+    publicClient.readContract({ address: ROUND_ADDRESS, abi: atrRoundAbi, functionName: "currentTick" }),
+    publicClient.readContract({ address: ROUND_ADDRESS, abi: atrRoundAbi, functionName: "lastTickTimestamp" }),
+  ])) as [number, bigint, bigint];
+  return { status, tick, lastTs };
+}
+
+// ─── joinRound bootstrap ────────────────────────────────────────────
+async function ensureJoined(): Promise<void> {
+  if (SKIP_JOIN) {
+    log(`${C.yellow}--no-join${C.reset} — assuming already joined`);
+    return;
+  }
+
+  // A fresh wallet that hasn't joined returns the all-zero AgentState struct.
+  // alive=true OR payload>0 OR tong>0 means we're in.
+  const snap = await readSnapshot();
+  if (snap.alive || snap.payload > 0n || snap.tong > 0n) {
+    log(`${C.green}already joined${C.reset} — payload=${formatEther(snap.payload)} tong=${formatEther(snap.tong)}`);
+    return;
+  }
+
+  // Approve TONG entry fee if needed (round may be free-entry during beta).
+  const tongAddr = (await publicClient.readContract({
+    address: ROUND_ADDRESS, abi: atrRoundAbi, functionName: "tongToken",
+  })) as Address;
+
+  const balance = (await publicClient.readContract({
+    address: tongAddr, abi: tongAbi, functionName: "balanceOf", args: [account.address],
+  })) as bigint;
+
+  if (balance >= ENTRY_FEE_TONG) {
+    const allowance = (await publicClient.readContract({
+      address: tongAddr, abi: tongAbi, functionName: "allowance",
+      args: [account.address, ROUND_ADDRESS],
+    })) as bigint;
+    if (allowance < ENTRY_FEE_TONG) {
+      log(`approving 500 TONG to round contract...`);
+      if (!DRY_RUN) {
+        const hash = await walletClient.writeContract({
+          address: tongAddr, abi: tongAbi, functionName: "approve",
+          args: [ROUND_ADDRESS, ENTRY_FEE_TONG], chain: base,
+        });
+        await publicClient.waitForTransactionReceipt({ hash });
+        log(`  approve tx: ${C.dim}${hash}${C.reset}`);
+      }
+    }
+  } else {
+    log(`${C.yellow}low TONG balance (${formatEther(balance)} < 500)${C.reset} — assuming voucher / free-entry`);
+  }
+
+  const strategyHash = computeStrategyHash();
+  log(`joining round with strategyHash=${C.dim}${strategyHash.slice(0, 10)}…${C.reset} hostingMode=0 (Local CLI)`);
+
+  if (DRY_RUN) return;
+  const hash = await walletClient.writeContract({
+    address: ROUND_ADDRESS, abi: atrRoundAbi, functionName: "joinRound",
+    args: [strategyHash, HOSTING_MODE_LOCAL_CLI], chain: base,
+  });
+  await publicClient.waitForTransactionReceipt({ hash });
+  log(`${C.green}joined${C.reset} tx: ${C.dim}${hash}${C.reset}`);
+}
+
+// ─── Decide + commit ────────────────────────────────────────────────
+async function decideAndCommit(execTick: bigint): Promise<void> {
+  const snap = await readSnapshot();
+  if (!snap.alive || snap.missCount >= STARVATION_STEPS) {
+    log(`${C.red}agent eliminated${C.reset} — exiting`);
+    process.exit(0);
+  }
+
+  let action: AgentAction;
+  if (llm) {
+    const decision = await llm.callForDecision(snap, Number(execTick));
+    if (!decision) {
+      action = heuristicAction(snap, STRATEGY, Number(execTick));
+      log(`${C.dim}LLM returned null — heuristic fallback${C.reset}`);
+    } else {
+      action = validateAndClamp(decision, snap);
+    }
+  } else {
+    action = heuristicAction(snap, STRATEGY, Number(execTick));
+  }
+
+  const salt = generateSalt();
+  const commitment = computeCommitment(action, salt);
+
+  log(
+    `${C.cyan}COMMIT${C.reset} t=${execTick}  ` +
+      `payload=${formatEther(action.ePayloadProd)}  ` +
+      `alpha=${formatEther(action.eAlphaProd)}  ` +
+      `craft=${formatEther(action.eCraft)}  ` +
+      `(cap=${formatEther(snap.throughputCap)})`,
+  );
+
+  pending = { tick: Number(execTick), action, salt };
+
+  if (DRY_RUN) return;
+  try {
+    const hash = await submitCommit(walletClient, ROUND_ADDRESS, commitment);
+    log(`  commit tx: ${C.dim}${hash}${C.reset}`);
+  } catch (e: any) {
+    log(`${C.red}commit revert: ${e.shortMessage ?? e.message ?? e}${C.reset}`);
+    pending = null;
+  }
+}
+
+// ─── Reveal ─────────────────────────────────────────────────────────
+async function maybeReveal(execTick: bigint): Promise<void> {
+  if (!pending || pending.tick !== Number(execTick)) return;
+  const p = pending;
+  pending = null;
+
+  log(`${C.cyan}REVEAL${C.reset} t=${p.tick}`);
+  if (DRY_RUN) return;
+  try {
+    const hash = await submitReveal(walletClient, ROUND_ADDRESS, p.action, p.salt);
+    log(`  reveal tx: ${C.dim}${hash}${C.reset}`);
+  } catch (e: any) {
+    log(`${C.red}reveal revert: ${e.shortMessage ?? e.message ?? e}${C.reset}`);
+  }
+}
+
+// ─── Round end ──────────────────────────────────────────────────────
+async function handleResolved(): Promise<void> {
+  log(`${C.yellow}round RESOLVED${C.reset}`);
+  if (llm) log(`  LLM spend: ${formatSpend(llm.getSpend())}`);
+
+  const snap = await readSnapshot();
+  if (!snap.alive) {
+    log(`agent did not survive — no prize to claim`);
+    return;
+  }
+  log(`agent survived — calling claimPrize()...`);
+  if (DRY_RUN) return;
+  try {
+    const hash = await submitClaimPrize(walletClient, ROUND_ADDRESS);
+    await publicClient.waitForTransactionReceipt({ hash });
+    log(`${C.green}prize claimed${C.reset} tx: ${C.dim}${hash}${C.reset}`);
+  } catch (e: any) {
+    log(`${C.red}claimPrize failed: ${e.shortMessage ?? e.message ?? e}${C.reset}`);
+    log(`${C.yellow}you may need to call claimPrize() manually from your wallet${C.reset}`);
+  }
+}
+
+// ─── Main poll loop ─────────────────────────────────────────────────
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+async function pollLoop(): Promise<void> {
+  while (true) {
+    try {
+      const { status, tick, lastTs } = await readTiming();
+
+      if (status === ROUND_STATUS.RESOLVED) {
+        await handleResolved();
+        return;
+      }
+      if (status !== ROUND_STATUS.ACTIVE) {
+        log(`waiting for round to start (status=${status})…`);
+        await sleep(15_000);
+        continue;
+      }
+
+      const now = BigInt(Math.floor(Date.now() / 1000));
+      const tickStart = lastTs;
+      const commitDeadline = tickStart + BigInt(COMMIT_WINDOW_SEC);
+      const tickEnd = tickStart + BigInt(TICK_DURATION_SEC);
+      const execTick = tick + 1n;
+
+      // New tick → drop any pending reveal we never got to submit.
+      if (tick !== lastSeenTick) {
+        lastSeenTick = tick;
+        if (pending && pending.tick < Number(execTick)) {
+          log(`${C.yellow}stale pending reveal for t=${pending.tick} — clearing${C.reset}`);
+          pending = null;
+        }
+      }
+
+      // Commit window — submit if we haven't yet for this execTick.
+      if (now < commitDeadline && (!pending || pending.tick !== Number(execTick))) {
+        await decideAndCommit(execTick);
+        await sleep(2_000);
+        continue;
+      }
+
+      // Reveal window — submit at +200s to leave a 100s safety margin.
+      if (now >= commitDeadline && now < tickEnd && pending?.tick === Number(execTick)) {
+        await maybeReveal(execTick);
+        await sleep(2_000);
+        continue;
+      }
+
+      // Idle — sleep to the next interesting boundary.
+      const wait = now < commitDeadline
+        ? Math.min(Number(commitDeadline - now), 30)
+        : Math.max(Number(tickEnd - now), 5);
+      await sleep(wait * 1_000);
+    } catch (e: any) {
+      log(`${C.red}poll error: ${e.shortMessage ?? e.message ?? e}${C.reset}`);
+      await sleep(15_000);
+    }
+  }
+}
+
+// ─── Boot ───────────────────────────────────────────────────────────
+(async () => {
+  try {
+    await ensureJoined();
+    await pollLoop();
+    log(`${C.dim}exit.${C.reset}`);
+  } catch (e: any) {
+    fatal(e?.shortMessage ?? e?.message ?? String(e));
+  }
+})();
+
+process.on("SIGINT", () => {
+  log(`\n${C.dim}interrupted — exiting cleanly. Pending reveals (if any) are dropped.${C.reset}`);
+  process.exit(0);
+});
