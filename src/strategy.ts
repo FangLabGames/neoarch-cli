@@ -8,7 +8,9 @@ import type { AgentAction, SwapOrder } from "./commit-reveal.ts";
 export interface AgentSnapshot {
   alive: boolean;
   payload: bigint;
-  tong: bigint;
+  /// USDC-backed internal credits. Field formerly named `tong` pre-Arc migration.
+  /// Read from the on-chain AgentState struct's `credits` field.
+  credits: bigint;
   alphaBalance: bigint;
   moduleTier: number;
   moduleDurability: bigint;
@@ -31,8 +33,11 @@ const HUNDRED = 100n;
 /// set, and as fallback when the LLM call fails or hits the local spend cap.
 ///
 /// Survival override: if the agent has missed any ticks OR is below a 2-tick
-/// payload buffer (100 payload), dump 100% throughput into payload until
-/// recovered. Beats the contract's built-in 70/30 fallback on the survival axis.
+/// payload buffer (20 credits = 2× PAYLOAD_CONSUMPTION on the Arc/USDC 6dp
+/// scale), dump 100% throughput into payload until recovered. Beats the
+/// contract's built-in 70/30 fallback on the survival axis.
+const PAYLOAD_SURVIVAL_THRESHOLD = 20n * 10n ** 6n; // 2× PAYLOAD_CONSUMPTION in 6dp USDC units
+
 export function heuristicAction(
   snapshot: AgentSnapshot,
   strategy: Strategy,
@@ -42,7 +47,7 @@ export function heuristicAction(
   if (cap === 0n) {
     return { ePayloadProd: 0n, eAlphaProd: 0n, eCraft: 0n, swaps: [] };
   }
-  const survivalNeeded = snapshot.missCount > 0 || snapshot.payload < 100n * 10n ** 18n;
+  const survivalNeeded = snapshot.missCount > 0 || snapshot.payload < PAYLOAD_SURVIVAL_THRESHOLD;
   if (survivalNeeded) {
     return { ePayloadProd: cap, eAlphaProd: 0n, eCraft: 0n, swaps: [] };
   }

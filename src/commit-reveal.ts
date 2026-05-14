@@ -114,14 +114,20 @@ export async function submitReveal(
   } as any);
 }
 
-export async function submitClaimPrize(
+/// @notice Arc/USDC migration: ATRRound's `_resolveRound` auto-pushes prizes
+///         to survivors at resolution time via `_payoutOrDefer`. The only
+///         pull-payment path is `claimDeferredPayout()` and it's used ONLY
+///         when the auto-push transfer failed (e.g. contract recipient with
+///         reverting fallback, USDC blacklist hit). Check `pendingPayouts`
+///         before calling — if zero, you've already been paid.
+export async function submitClaimDeferredPayout(
   wallet: WalletClient,
   roundAddress: Address,
 ): Promise<Hex> {
   return await wallet.writeContract({
     address: roundAddress,
     abi: atrRoundAbi,
-    functionName: "claimPrize",
+    functionName: "claimDeferredPayout",
     chain: base,
   } as any);
 }

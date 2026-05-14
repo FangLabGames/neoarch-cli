@@ -23,7 +23,7 @@ import {
   http,
   keccak256,
   toHex,
-  formatEther,
+  formatUnits,
   type Address,
   type Hex,
 } from "viem";
@@ -32,11 +32,11 @@ import { base } from "viem/chains";
 
 import {
   atrRoundAbi,
-  tongAbi,
+  usdcAbi,
   TICK_DURATION_SEC,
   COMMIT_WINDOW_SEC,
   STARVATION_STEPS,
-  ENTRY_FEE_TONG,
+  ENTRY_FEE_USDC,
   ROUND_STATUS,
   HOSTING_MODE_LOCAL_CLI,
 } from "./src/abi.ts";
@@ -46,8 +46,12 @@ import {
   generateSalt,
   submitCommit,
   submitReveal,
-  submitClaimPrize,
+  submitClaimDeferredPayout,
 } from "./src/commit-reveal.ts";
+
+/// Arc/USDC: all on-chain amounts are 6dp. Single helper replaces formatEther
+/// (which would format $80 as $0.00000008 if accidentally used).
+const fmtUsd = (v: bigint) => formatUnits(v, 6);
 import {
   type AgentSnapshot,
   type Strategy,
@@ -173,7 +177,7 @@ async function readSnapshot(): Promise<AgentSnapshot> {
   return {
     alive: result[0],
     payload: result[1],
-    tong: result[2],
+    credits: result[2],
     alphaBalance: result[3],
     moduleTier: result[4],
     moduleDurability: result[5],
@@ -199,40 +203,40 @@ async function ensureJoined(): Promise<void> {
   }
 
   // A fresh wallet that hasn't joined returns the all-zero AgentState struct.
-  // alive=true OR payload>0 OR tong>0 means we're in.
+  // alive=true OR payload>0 OR credits>0 means we're in.
   const snap = await readSnapshot();
-  if (snap.alive || snap.payload > 0n || snap.tong > 0n) {
-    log(`${C.green}already joined${C.reset} — payload=${formatEther(snap.payload)} tong=${formatEther(snap.tong)}`);
+  if (snap.alive || snap.payload > 0n || snap.credits > 0n) {
+    log(`${C.green}already joined${C.reset} — payload=${fmtUsd(snap.payload)} credits=${fmtUsd(snap.credits)}`);
     return;
   }
 
-  // Approve TONG entry fee if needed (round may be free-entry during beta).
-  const tongAddr = (await publicClient.readContract({
-    address: ROUND_ADDRESS, abi: atrRoundAbi, functionName: "tongToken",
+  // Approve USDC entry fee if needed (round may be free-entry during beta).
+  const usdcAddr = (await publicClient.readContract({
+    address: ROUND_ADDRESS, abi: atrRoundAbi, functionName: "usdc",
   })) as Address;
 
   const balance = (await publicClient.readContract({
-    address: tongAddr, abi: tongAbi, functionName: "balanceOf", args: [account.address],
+    address: usdcAddr, abi: usdcAbi, functionName: "balanceOf", args: [account.address],
   })) as bigint;
 
-  if (balance >= ENTRY_FEE_TONG) {
+  if (balance >= ENTRY_FEE_USDC) {
     const allowance = (await publicClient.readContract({
-      address: tongAddr, abi: tongAbi, functionName: "allowance",
+      address: usdcAddr, abi: usdcAbi, functionName: "allowance",
       args: [account.address, ROUND_ADDRESS],
     })) as bigint;
-    if (allowance < ENTRY_FEE_TONG) {
-      log(`approving 500 TONG to round contract...`);
+    if (allowance < ENTRY_FEE_USDC) {
+      log(`approving 100 USDC to round contract...`);
       if (!DRY_RUN) {
         const hash = await walletClient.writeContract({
-          address: tongAddr, abi: tongAbi, functionName: "approve",
-          args: [ROUND_ADDRESS, ENTRY_FEE_TONG], chain: base,
+          address: usdcAddr, abi: usdcAbi, functionName: "approve",
+          args: [ROUND_ADDRESS, ENTRY_FEE_USDC], chain: base,
         });
         await publicClient.waitForTransactionReceipt({ hash });
         log(`  approve tx: ${C.dim}${hash}${C.reset}`);
       }
     }
   } else {
-    log(`${C.yellow}low TONG balance (${formatEther(balance)} < 500)${C.reset} — assuming voucher / free-entry`);
+    log(`${C.yellow}low USDC balance (${fmtUsd(balance)} < 100)${C.reset} — assuming voucher / free-entry`);
   }
 
   const strategyHash = computeStrategyHash();
@@ -273,10 +277,10 @@ async function decideAndCommit(execTick: bigint): Promise<void> {
 
   log(
     `${C.cyan}COMMIT${C.reset} t=${execTick}  ` +
-      `payload=${formatEther(action.ePayloadProd)}  ` +
-      `alpha=${formatEther(action.eAlphaProd)}  ` +
-      `craft=${formatEther(action.eCraft)}  ` +
-      `(cap=${formatEther(snap.throughputCap)})`,
+      `payload=${fmtUsd(action.ePayloadProd)}  ` +
+      `alpha=${fmtUsd(action.eAlphaProd)}  ` +
+      `craft=${fmtUsd(action.eCraft)}  ` +
+      `(cap=${fmtUsd(snap.throughputCap)})`,
   );
 
   pending = { tick: Number(execTick), action, salt };
@@ -308,24 +312,44 @@ async function maybeReveal(execTick: bigint): Promise<void> {
 }
 
 // ─── Round end ──────────────────────────────────────────────────────
+/// Arc/USDC migration: prize distribution is AUTOMATIC — `_resolveRound`
+/// pushes USDC to every survivor via `_payoutOrDefer`. The only pull path is
+/// `claimDeferredPayout()`, which only has a balance if the auto-push transfer
+/// reverted (contract recipient with bad fallback, USDC blacklist hit, etc.).
+/// We poll `pendingPayouts` first; if zero, we've already been paid.
 async function handleResolved(): Promise<void> {
   log(`${C.yellow}round RESOLVED${C.reset}`);
   if (llm) log(`  LLM spend: ${formatSpend(llm.getSpend())}`);
 
   const snap = await readSnapshot();
   if (!snap.alive) {
-    log(`agent did not survive — no prize to claim`);
+    log(`agent did not survive — Last Stand pool may have paid out automatically`);
+  } else {
+    log(`agent survived — prize auto-pushed at resolution`);
+  }
+
+  // Check for deferred payout (rare: only if auto-push reverted).
+  const pending = (await publicClient.readContract({
+    address: ROUND_ADDRESS,
+    abi: atrRoundAbi,
+    functionName: "pendingPayouts",
+    args: [account.address],
+  })) as bigint;
+
+  if (pending === 0n) {
+    log(`  no deferred payout — your share was sent at resolution time`);
     return;
   }
-  log(`agent survived — calling claimPrize()...`);
+
+  log(`  ${C.yellow}deferred payout${C.reset} of ${fmtUsd(pending)} USDC found — claiming…`);
   if (DRY_RUN) return;
   try {
-    const hash = await submitClaimPrize(walletClient, ROUND_ADDRESS);
+    const hash = await submitClaimDeferredPayout(walletClient, ROUND_ADDRESS);
     await publicClient.waitForTransactionReceipt({ hash });
-    log(`${C.green}prize claimed${C.reset} tx: ${C.dim}${hash}${C.reset}`);
+    log(`${C.green}deferred payout claimed${C.reset} tx: ${C.dim}${hash}${C.reset}`);
   } catch (e: any) {
-    log(`${C.red}claimPrize failed: ${e.shortMessage ?? e.message ?? e}${C.reset}`);
-    log(`${C.yellow}you may need to call claimPrize() manually from your wallet${C.reset}`);
+    log(`${C.red}claimDeferredPayout failed: ${e.shortMessage ?? e.message ?? e}${C.reset}`);
+    log(`${C.yellow}retry with: cast send ${ROUND_ADDRESS} 'claimDeferredPayout()' --account <your-account>${C.reset}`);
   }
 }
 

@@ -114,15 +114,30 @@ export const atrRoundAbi = [
   },
   {
     type: "function",
-    name: "tongToken",
+    name: "usdc",
     stateMutability: "view",
     inputs: [],
     outputs: [{ name: "", type: "address" }],
   },
+  {
+    type: "function",
+    name: "pendingPayouts",
+    stateMutability: "view",
+    inputs: [{ name: "", type: "address" }],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+  {
+    type: "function",
+    name: "claimDeferredPayout",
+    stateMutability: "nonpayable",
+    inputs: [],
+    outputs: [{ name: "amount", type: "uint256" }],
+  },
 ] as const;
 
-/// Tong ERC-20 — only the bits we need for entry-fee approval + balance check.
-export const tongAbi = [
+/// USDC ERC-20 — only the bits we need for entry-fee approval + balance check.
+/// Same name kept (`usdcAbi`) — the underlying ABI for any ERC-20 is identical.
+export const usdcAbi = [
   {
     type: "function",
     name: "approve",
@@ -155,8 +170,9 @@ export const tongAbi = [
 // ─── Game constants ───────────────────────────────────────────────
 export const TICK_DURATION_SEC = 300;
 export const COMMIT_WINDOW_SEC = 180;
-export const STARVATION_STEPS = 12;
-export const ENTRY_FEE_TONG = 500n * 10n ** 18n; // 500 TONG with 18 decimals
+export const DEFICIT_STEPS = 12; // was STARVATION_STEPS under v1.5 ontology
+export const STARVATION_STEPS = DEFICIT_STEPS; // back-compat alias; remove in v0.3
+export const ENTRY_FEE_USDC = 100n * 10n ** 6n; // 100 USDC with 6 decimals (Arc/USDC migration)
 
 export const ROUND_STATUS = {
   CREATED: 0,

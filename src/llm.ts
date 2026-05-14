@@ -116,15 +116,17 @@ export class LlmClient {
   }
 
   private buildUserPrompt(s: AgentSnapshot, tick: number): string {
-    const fmt = (v: bigint) => (Number(v) / 1e18).toFixed(2);
+    // Arc/USDC migration: credits + payload + alpha + throughput are all 6dp
+    // (matches USDC). 1 credit = 1 USDC at round-end redemption.
+    const fmt = (v: bigint) => (Number(v) / 1e6).toFixed(2);
     return [
       `STATE (tick ${tick}):`,
       `  alive: ${s.alive}`,
-      `  payload: ${fmt(s.payload)}    (eat 50/tick or starve)`,
-      `  tong: ${fmt(s.tong)}`,
+      `  payload: ${fmt(s.payload)}    (consume 10/tick → deficit if you can't keep up)`,
+      `  credits: ${fmt(s.credits)}    (USDC-backed; redeemed at round end)`,
       `  alphaBalance: ${fmt(s.alphaBalance)}`,
       `  moduleTier: ${s.moduleTier}      (0=bare, 1=bronze, 2=iron, 3=silver, 4=golden)`,
-      `  throughputCap: ${fmt(s.throughputCap)}`,
+      `  throughputCap: ${fmt(s.throughputCap)}    (default 20 credits/tick, drops as missCount grows)`,
       `  missCount: ${s.missCount} / 12  (eliminated at 12)`,
       ``,
       `Decide your allocation now. Output the JSON only.`,
