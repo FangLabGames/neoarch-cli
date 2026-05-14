@@ -82,7 +82,7 @@ const has = (name: string): boolean => argv.includes(`--${name}`);
 
 const AGENT_PK = (process.env.AGENT_PK ?? "") as Hex;
 const ROUND_ADDRESS = (process.env.ROUND_ADDRESS ?? flag("round")) as Address;
-const RPC = flag("rpc", process.env.RPC ?? "https://mainnet.base.org");
+const RPC = flag("rpc", process.env.RPC ?? "https://rpc.testnet.arc.network");
 const STRATEGY = flag("strategy", "balanced") as Strategy;
 const LLM_PROVIDER = flag("llm", process.env.LLM_PROVIDER ?? "") as Provider | "";
 const LLM_MODEL = flag("model", process.env.LLM_MODEL ?? "");

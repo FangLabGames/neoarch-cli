@@ -1,4 +1,4 @@
-/// Frozen ATRRound ABI for v1.5.3 (Base mainnet, May 2026).
+/// Frozen ATRRound ABI for the Arc Testnet deployment (chain 5042002).
 ///
 /// This is the full surface the CLI calls — joinRound, commitAction,
 /// revealAction, claimPrize, plus state-reading views. Pinning here means
@@ -64,7 +64,7 @@ export const atrRoundAbi = [
     outputs: [
       { name: "alive", type: "bool" },
       { name: "payload", type: "uint256" },
-      { name: "tong", type: "uint256" },
+      { name: "credits", type: "uint256" },
       { name: "alphaBalance", type: "uint256" },
       { name: "moduleTier", type: "uint8" },
       { name: "moduleDurability", type: "uint256" },

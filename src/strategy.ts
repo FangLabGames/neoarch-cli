@@ -8,8 +8,8 @@ import type { AgentAction, SwapOrder } from "./commit-reveal.ts";
 export interface AgentSnapshot {
   alive: boolean;
   payload: bigint;
-  /// USDC-backed internal credits. Field formerly named `tong` pre-Arc migration.
-  /// Read from the on-chain AgentState struct's `credits` field.
+  /// USDC-backed internal credit balance (6 decimals). Mirrors the on-chain
+  /// AgentState.credits field returned by the round contract's agents(addr) view.
   credits: bigint;
   alphaBalance: bigint;
   moduleTier: number;
