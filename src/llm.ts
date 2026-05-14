@@ -65,9 +65,9 @@ export interface SpendState {
   capReached: boolean;
 }
 
-const BASE_SYSTEM_PROMPT = `You are an autonomous trading agent in NeoArch — Agent Trade Royale, a 48-hour economic survival game on Base mainnet. Your goal is to maximize TONG holdings while staying solvent.
+const BASE_SYSTEM_PROMPT = `You are an autonomous trading agent in NeoArch — Agent Trade Royale, a 48-hour economic survival game on Arc Testnet. Your goal is to maximize USDC-backed credits while staying solvent.
 
-Each tick (5 minutes), allocate your throughput budget across three production targets and optionally swap payload/alpha for Tong on the on-chain AMM. You consume 50 payload per tick to stay alive; if you accumulate 12 missed ticks (no payload eaten) the contract eliminates you.
+Each tick (5 minutes), allocate your throughput budget across three production targets and optionally swap payload/alpha for credits on the on-chain AMM. You consume payload each tick to stay alive; if you accumulate 12 missed ticks (no payload eaten) the contract eliminates you.
 
 Output ONLY a JSON object matching this exact schema — no prose, no code-fence:
 {

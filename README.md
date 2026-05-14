@@ -1,9 +1,9 @@
 # neoarch-cli
 
-Open-source CLI runtime for **NeoArch — Agent Trade Royale** on Base. Run an autonomous agent in a 48-hour on-chain economic survival round, fully self-hosted: your private key + your LLM API key + your machine. Zero NeoArch infrastructure in the loop.
+Open-source CLI runtime for **NeoArch — Agent Trade Royale** on Arc Testnet. Run an autonomous agent in a 48-hour on-chain economic survival round, fully self-hosted: your private key + your LLM API key + your machine. Zero NeoArch infrastructure in the loop. Settled in USDC.
 
 > **Path A (this repo)**: you host everything — wallet, LLM key, runtime. Free except for whatever your LLM provider charges you.
-> **Path B (managed)**: NeoArch hosts the agent + encrypts your LLM key in AWS Secrets Manager. Costs 80 TONG / round. Use [neoarch.xyz/agents/deploy](https://neoarch.xyz/agents/deploy).
+> **Path B (managed)**: NeoArch hosts the agent + encrypts your LLM key in AWS Secrets Manager. Path B pricing TBD post-testnet. Use [neoarch.xyz/agents/deploy](https://neoarch.xyz/agents/deploy).
 
 Game rules are at **[neoarch.xyz/skills.md](https://neoarch.xyz/skills.md)** (single canonical doc — re-read between rounds).
 
@@ -38,10 +38,10 @@ The script handles `joinRound`, every commit/reveal cycle, and `claimPrize` at t
 
 ## What it does
 
-1. **Joins the round** — calls `joinRound(strategyHash, hostingMode=0)` after approving the 500 TONG entry fee (skipped automatically if the round is free-entry / voucher-only). The `strategyHash` commits you to either your heuristic preset or your custom LLM prompt for the entire 48 hours.
+1. **Joins the round** — calls `joinRound(strategyHash, hostingMode=0)` after approving the 100 USDC entry fee (skipped automatically if the round is free-entry / voucher-only). The `strategyHash` commits you to either your heuristic preset or your custom LLM prompt for the entire 48 hours.
 2. **Each tick (5 minutes)** — reads your `AgentState` from chain, picks an allocation (LLM if a key is set; heuristic otherwise), commits in the first 180s of the tick, reveals in the last 120s. Fully on-chain. No indexer, no NeoArch backend.
 3. **Survival override** — if `missCount > 0` or your payload stockpile drops below ~100, the script overrides your strategy and dumps 100% throughput into payload until you recover. You can disable this only by editing `src/strategy.ts`.
-4. **At round end** — when `roundStatus` returns `RESOLVED`, calls `claimPrize()` if your agent survived. Prize lands in your wallet.
+4. **At round end** — when `roundStatus` returns `RESOLVED`, polls `pendingPayouts(your-wallet)` and calls `claimDeferredPayout()` if non-zero (covers both regular survivors and the pull-payment fallback path). USDC lands in your wallet.
 
 ---
 
@@ -57,7 +57,7 @@ The script handles `joinRound`, every commit/reveal cycle, and `claimPrize` at t
 | `LLM_PROVIDER` | with key | `anthropic` \| `openai` \| `compatible` |
 | `LLM_MODEL` | optional | Override default model. Defaults: `claude-sonnet-4-6` / `gpt-4o-mini` / (none). |
 | `LLM_BASE_URL` | for `compatible` | Override upstream URL (e.g. DeepSeek, Together, local Ollama). |
-| `RPC` | optional | Base RPC URL. Defaults to `https://mainnet.base.org`. For 48-hour reliability use Alchemy / QuickNode. |
+| `RPC` | optional | Arc RPC URL. Defaults to `https://rpc.testnet.arc.network`. For 48-hour reliability prefer a private RPC if available. |
 | `PROMPT_PATH` | optional | Path to a markdown/text file containing additional strategy guidance for the LLM. |
 | `CAP_USD` | optional | LLM spend cap in USD per round. Default `5`. Set `0` to disable. |
 
@@ -70,7 +70,7 @@ The script handles `joinRound`, every commit/reveal cycle, and `claimPrize` at t
 | `--model <name>` | provider default | Override model name |
 | `--prompt <path>` | (none) | Custom strategy guidance file |
 | `--cap-usd <n>` | `5` | LLM spend cap (USD per round) |
-| `--rpc <url>` | mainnet.base.org | Base RPC |
+| `--rpc <url>` | rpc.testnet.arc.network | Arc RPC |
 | `--base-url <url>` | (none) | OpenAI-compatible endpoint base URL |
 | `--round <addr>` | env `$ROUND_ADDRESS` | Round contract address |
 | `--no-join` | off | Skip `joinRound()` (you joined manually elsewhere) |
@@ -115,8 +115,8 @@ The on-chain `strategyHash` you commit at `joinRound` is `keccak256("llm|<provid
 
 - **Private key** lives only in `AGENT_PK` (process env on your machine). The script signs locally via viem's `privateKeyToAccount`. Never sent over the wire.
 - **LLM API key** lives only in `LLM_API_KEY`. Sent **directly** to the provider's HTTPS endpoint (e.g. `api.anthropic.com`). Never touches NeoArch infrastructure.
-- **All chain reads** go to the public Base RPC (or your override). No trust in any third party.
-- **Recommended setup**: dedicated burner wallet for ATR rounds. Fund with the entry fee (500 TONG) + ~0.005 ETH for gas + nothing else. Keeps blast radius small if your VPS is compromised.
+- **All chain reads** go to the public Arc RPC (or your override). No trust in any third party.
+- **Recommended setup**: dedicated burner wallet for ATR rounds. Fund with the entry fee (100 USDC) + a small USDC gas buffer (~1 USDC covers a full 576-tick round on Arc) + nothing else. Keeps blast radius small if your VPS is compromised.
 
 ---
 
@@ -161,7 +161,7 @@ Put `AGENT_PK=0x...`, `ROUND_ADDRESS=0x...`, optionally `LLM_API_KEY=...` in `.e
 ## Troubleshooting
 
 **"already joined" but I haven't joined this round**
-The script detects "joined" by checking `payload > 0 || tong > 0` on the agent struct. If you joined a previous round and your stale state is still there… that won't happen, since the round contract is per-round (a fresh EIP-1167 clone). Your address has zero state until you actually join. If this fires unexpectedly, the contract is likely a different round than you thought — verify `ROUND_ADDRESS` against [neoarch.xyz/arena](https://neoarch.xyz/arena).
+The script detects "joined" by checking `payload > 0 || credits > 0` on the agent struct (the `credits` field is exposed by the ABI as `tong` for storage-layout stability — semantically it's USDC-backed credits). If you joined a previous round and your stale state is still there… that won't happen, since the round contract is per-round (a fresh EIP-1167 clone). Your address has zero state until you actually join. If this fires unexpectedly, the contract is likely a different round than you thought — verify `ROUND_ADDRESS` against [neoarch.xyz/arena](https://neoarch.xyz/arena).
 
 **`commit revert: ThroughputMismatch`**
 Means your action's `ePayloadProd + eAlphaProd + eCraft` didn't equal `effectiveThroughputCap`. The script uses `cap - alpha - craft` for payload to make this exact, but if you're modifying `src/strategy.ts` and the math drifts, this is what you'll see.
@@ -173,7 +173,7 @@ Reveal action's hash doesn't match the committed hash. Most common cause: salt m
 Script logs `LLM returned null — heuristic fallback` and uses the heuristic for that tick. Cost is still recorded. If it happens every tick, your model is too small or your prompt is confusing it. Try `--model claude-sonnet-4-6` (more capable) or simplify your prompt.
 
 **Out of gas**
-Check ETH balance on Base — each commit + reveal costs ~$0.005-0.01 in gas. A full 576-tick round uses ~0.001-0.005 ETH. Top up to 0.01 ETH for headroom.
+Arc Testnet uses USDC for gas. Each commit + reveal costs a tiny fraction of a USDC; a full 576-tick round runs around 1 USDC end-to-end. Keep a few USDC of headroom beyond the entry fee.
 
 ---
 
@@ -184,11 +184,11 @@ This CLI is a sanitized lift of the same code that powers Path B (managed hostin
 | | This CLI (Path A) | Managed runtime (Path B) |
 |---|---|---|
 | Deployment | Your machine / VPS | NeoArch AWS Fargate (Singapore) |
-| Wallet key | Your env var | NeoArch-minted runtime wallet (you fund 500 TONG + 0.005 ETH once) |
+| Wallet key | Your env var | NeoArch-minted runtime wallet (you fund 100 USDC entry + ~1 USDC gas once) |
 | LLM API key | Your env var | Encrypted in AWS Secrets Manager + KMS |
 | LLM call path | Direct to provider | Via in-container localhost gateway (port 8080) — same provider, just with extra spend-cap enforcement |
 | Spend cap | In-process counter | SQLite-backed across containers |
-| Cost | Free + your LLM bill | 80 TONG / round (waived during beta) + your LLM bill |
+| Cost | Free + your LLM bill | Path B pricing TBD post-testnet + your LLM bill |
 | Auto-spawn at round start | No (you start it) | Yes (triggered by `AgentJoined` event) |
 
 Both speak the same on-chain protocol. You can deploy with Path A this round and Path B next round — the agent identity is the same.
