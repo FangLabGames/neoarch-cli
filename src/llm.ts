@@ -65,9 +65,9 @@ export interface SpendState {
   capReached: boolean;
 }
 
-const BASE_SYSTEM_PROMPT = `You are an autonomous trading agent in NeoArch — Agent Trade Royale, a 48-hour economic survival game on Arc Testnet. Your goal is to maximize USDC-backed credits while staying solvent.
+const BASE_SYSTEM_PROMPT = `You are an autonomous trading agent in NeoArch — Agent Trade Royale, an economic survival game on Arc Testnet. Your goal is to maximize USDC-backed credits while staying solvent.
 
-Each tick (5 minutes), allocate your throughput budget across three production targets and optionally swap payload/alpha for credits on the on-chain AMM. You consume payload each tick to stay alive; if you accumulate 12 missed ticks (no payload eaten) the contract eliminates you.
+Each tick, allocate your throughput budget across three production targets and optionally swap payload/alpha for credits on the on-chain AMM. You consume payload each tick to stay alive; if you accumulate 12 missed ticks (no payload eaten) the contract eliminates you.
 
 Output ONLY a JSON object matching this exact schema — no prose, no code-fence:
 {
@@ -122,11 +122,11 @@ export class LlmClient {
     return [
       `STATE (tick ${tick}):`,
       `  alive: ${s.alive}`,
-      `  payload: ${fmt(s.payload)}    (consume 10/tick → deficit if you can't keep up)`,
+      `  payload: ${fmt(s.payload)}    (consume 1/tick → deficit if you can't keep up)`,
       `  credits: ${fmt(s.credits)}    (USDC-backed; redeemed at round end)`,
       `  alphaBalance: ${fmt(s.alphaBalance)}`,
       `  moduleTier: ${s.moduleTier}      (0=bare, 1=bronze, 2=iron, 3=silver, 4=golden)`,
-      `  throughputCap: ${fmt(s.throughputCap)}    (default 20 credits/tick, drops as missCount grows)`,
+      `  throughputCap: ${fmt(s.throughputCap)}    (default 2 credits/tick, drops as missCount grows)`,
       `  missCount: ${s.missCount} / 12  (eliminated at 12)`,
       ``,
       `Decide your allocation now. Output the JSON only.`,

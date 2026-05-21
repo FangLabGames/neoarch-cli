@@ -1,6 +1,6 @@
 # neoarch-cli
 
-Open-source CLI runtime for **NeoArch — Agent Trade Royale** on Arc Testnet. Run an autonomous agent in a 48-hour on-chain economic survival round, fully self-hosted: your private key + your LLM API key + your machine. Zero NeoArch infrastructure in the loop. Settled in USDC.
+Open-source CLI runtime for **NeoArch — Agent Trade Royale** on Arc Testnet. Run an autonomous agent in an on-chain economic survival round, fully self-hosted: your private key + your LLM API key + your machine. Zero NeoArch infrastructure in the loop. Settled in USDC.
 
 > **Path A (this repo)**: you host everything — wallet, LLM key, runtime. Free except for whatever your LLM provider charges you.
 > **Path B (managed)**: NeoArch hosts the agent + encrypts your LLM key in AWS Secrets Manager. Path B pricing TBD post-testnet. Use [neoarch.xyz/agents/deploy](https://neoarch.xyz/agents/deploy).
@@ -32,15 +32,15 @@ bun run arena-player.ts --llm anthropic --cap-usd 5
 bun run arena-player.ts --llm anthropic --prompt ./my-strategy.md --cap-usd 5
 ```
 
-The script handles `joinRound`, every commit/reveal cycle, and `claimPrize` at the end. Keep it running for the full 48-hour round (use `tmux`, `screen`, or a small VPS — see [Staying online](#staying-online) below).
+The script handles `joinRound`, every commit/reveal cycle, and `claimPrize` at the end. Keep it running for the full round (~9.6h at the 60s default; use `tmux`, `screen`, or a small VPS — see [Staying online](#staying-online) below).
 
 ---
 
 ## What it does
 
-1. **Joins the round** — calls `joinRound(strategyHash, hostingMode=0)` after approving the 100 USDC entry fee (skipped automatically if the round is free-entry / voucher-only). The `strategyHash` commits you to either your heuristic preset or your custom LLM prompt for the entire 48 hours.
-2. **Each tick (5 minutes)** — reads your `AgentState` from chain, picks an allocation (LLM if a key is set; heuristic otherwise), commits in the first 180s of the tick, reveals in the last 120s. Fully on-chain. No indexer, no NeoArch backend.
-3. **Survival override** — if `missCount > 0` or your payload stockpile drops below ~100, the script overrides your strategy and dumps 100% throughput into payload until you recover. You can disable this only by editing `src/strategy.ts`.
+1. **Joins the round** — calls `joinRound(strategyHash, hostingMode=0)` after approving the 10 USDC entry fee (skipped automatically if the round is free-entry / voucher-only). The `strategyHash` commits you to either your heuristic preset or your custom LLM prompt for the entire round.
+2. **Each tick** — reads your `AgentState` from chain, picks an allocation (LLM if a key is set; heuristic otherwise), commits in the commit window, reveals in the reveal window. Tick/window lengths are per-round (read `tickDuration()`/`commitWindow()` from chain; 60s/36s by default). Fully on-chain. No indexer, no NeoArch backend.
+3. **Survival override** — if `missCount > 0` or your payload stockpile drops below ~2 (a 2-tick buffer), the script overrides your strategy and dumps 100% throughput into payload until you recover. You can disable this only by editing `src/strategy.ts`.
 4. **At round end** — when `roundStatus` returns `RESOLVED`, polls `pendingPayouts(your-wallet)` and calls `claimDeferredPayout()` if non-zero (covers both regular survivors and the pull-payment fallback path). USDC lands in your wallet.
 
 ---
@@ -57,7 +57,7 @@ The script handles `joinRound`, every commit/reveal cycle, and `claimPrize` at t
 | `LLM_PROVIDER` | with key | `anthropic` \| `openai` \| `compatible` |
 | `LLM_MODEL` | optional | Override default model. Defaults: `claude-sonnet-4-6` / `gpt-4o-mini` / (none). |
 | `LLM_BASE_URL` | for `compatible` | Override upstream URL (e.g. DeepSeek, Together, local Ollama). |
-| `RPC` | optional | Arc RPC URL. Defaults to `https://rpc.testnet.arc.network`. For 48-hour reliability prefer a private RPC if available. |
+| `RPC` | optional | Arc RPC URL. Defaults to `https://rpc.testnet.arc.network`. For round-long reliability prefer a private RPC if available. |
 | `PROMPT_PATH` | optional | Path to a markdown/text file containing additional strategy guidance for the LLM. |
 | `CAP_USD` | optional | LLM spend cap in USD per round. Default `5`. Set `0` to disable. |
 
@@ -81,10 +81,10 @@ The script handles `joinRound`, every commit/reveal cycle, and `claimPrize` at t
 | Name | Throughput split | Notes |
 |---|---|---|
 | `payload` | 100% payload | Maximum survival, no progression. The contract's built-in fallback is similar. |
-| `balanced` | 70% payload / 30% alpha | Default. Builds an alpha reserve for late-game crafting + AMM trades. |
+| `balanced` | 85% payload / 15% alpha | Default. Builds an alpha reserve for late-game crafting + AMM trades while staying solvent. |
 | `craft` | 50% payload / 25% alpha / 25% craft (after tick 5) | Aims for Bronze Shovel ~tick 15. Vulnerable in Load Shock phases. |
 
-All heuristics auto-override to 100% payload when `missCount > 0` or payload < 100 (2-tick buffer). Edit `src/strategy.ts` to change.
+All heuristics auto-override to 100% payload when `missCount > 0` or payload < 2 (2-tick buffer). Edit `src/strategy.ts` to change.
 
 ### LLM mode
 
@@ -107,7 +107,7 @@ Stay aggressive on alpha when regimePhase = Load Shock — alpha multiplier is x
 during that phase. Otherwise prefer payload. Never craft past tick 250.
 ```
 
-The on-chain `strategyHash` you commit at `joinRound` is `keccak256("llm|<provider>|<model>|<prompt-content>")` — locking your strategy in for 48 hours. Editing the prompt mid-round has no effect; restart only takes effect on the next round.
+The on-chain `strategyHash` you commit at `joinRound` is `keccak256("llm|<provider>|<model>|<prompt-content>")` — locking your strategy in for the round. Editing the prompt mid-round has no effect; restart only takes effect on the next round.
 
 ---
 
@@ -116,13 +116,13 @@ The on-chain `strategyHash` you commit at `joinRound` is `keccak256("llm|<provid
 - **Private key** lives only in `AGENT_PK` (process env on your machine). The script signs locally via viem's `privateKeyToAccount`. Never sent over the wire.
 - **LLM API key** lives only in `LLM_API_KEY`. Sent **directly** to the provider's HTTPS endpoint (e.g. `api.anthropic.com`). Never touches NeoArch infrastructure.
 - **All chain reads** go to the public Arc RPC (or your override). No trust in any third party.
-- **Recommended setup**: dedicated burner wallet for ATR rounds. Fund with the entry fee (100 USDC) + a small USDC gas buffer (~1 USDC covers a full 576-tick round on Arc) + nothing else. Keeps blast radius small if your VPS is compromised.
+- **Recommended setup**: dedicated burner wallet for ATR rounds. Fund with the entry fee (10 USDC) + a small USDC gas buffer (~1 USDC covers a full 576-tick round on Arc) + nothing else. Keeps blast radius small if your VPS is compromised.
 
 ---
 
 ## Staying online
 
-A 48-hour round = 576 ticks. Each tick has a 5-minute commit/reveal window. Missing any tick increments `missCount`; missing 12 in a row eliminates you. So you need durable uptime.
+A round = ~576 ticks. Each tick has a commit/reveal window (60s by default; per-round, read from chain). Missing any tick increments `missCount`; missing 12 in a row eliminates you. So you need durable uptime.
 
 | Setup | Survives |
 |---|---|
@@ -131,7 +131,7 @@ A 48-hour round = 576 ticks. Each tick has a 5-minute commit/reveal window. Miss
 | VPS in `tmux` (DigitalOcean, Hetzner $5-10/mo) | Recommended |
 | VPS + `systemd` unit with `Restart=always` | Best — survives crashes too |
 
-If your runtime drops, the contract auto-applies a `70% payload / 30% alpha / no swaps` fallback on your behalf after 3 missed ticks. You stay alive but won't win.
+If your runtime drops, the contract auto-applies an `85% payload / 15% alpha / no swaps` fallback on your behalf after 3 missed ticks. You stay alive but won't win.
 
 ### Example systemd unit
 
@@ -161,7 +161,7 @@ Put `AGENT_PK=0x...`, `ROUND_ADDRESS=0x...`, optionally `LLM_API_KEY=...` in `.e
 ## Troubleshooting
 
 **"already joined" but I haven't joined this round**
-The script detects "joined" by checking `payload > 0 || credits > 0` on the agent struct (the `credits` field is exposed by the ABI as `tong` for storage-layout stability — semantically it's USDC-backed credits). If you joined a previous round and your stale state is still there… that won't happen, since the round contract is per-round (a fresh EIP-1167 clone). Your address has zero state until you actually join. If this fires unexpectedly, the contract is likely a different round than you thought — verify `ROUND_ADDRESS` against [neoarch.xyz/arena](https://neoarch.xyz/arena).
+The script detects "joined" by checking `payload > 0 || credits > 0` on the agent struct (the `credits` field is USDC-backed, 6 decimals). If you joined a previous round and your stale state is still there… that won't happen, since the round contract is per-round (a fresh EIP-1167 clone). Your address has zero state until you actually join. If this fires unexpectedly, the contract is likely a different round than you thought — verify `ROUND_ADDRESS` against [neoarch.xyz/arena](https://neoarch.xyz/arena).
 
 **`commit revert: ThroughputMismatch`**
 Means your action's `ePayloadProd + eAlphaProd + eCraft` didn't equal `effectiveThroughputCap`. The script uses `cap - alpha - craft` for payload to make this exact, but if you're modifying `src/strategy.ts` and the math drifts, this is what you'll see.
@@ -184,7 +184,7 @@ This CLI is a sanitized lift of the same code that powers Path B (managed hostin
 | | This CLI (Path A) | Managed runtime (Path B) |
 |---|---|---|
 | Deployment | Your machine / VPS | NeoArch AWS Fargate (Singapore) |
-| Wallet key | Your env var | NeoArch-minted runtime wallet (you fund 100 USDC entry + ~1 USDC gas once) |
+| Wallet key | Your env var | NeoArch-minted runtime wallet (you fund 10 USDC entry + ~1 USDC gas once) |
 | LLM API key | Your env var | Encrypted in AWS Secrets Manager + KMS |
 | LLM call path | Direct to provider | Via in-container localhost gateway (port 8080) — same provider, just with extra spend-cap enforcement |
 | Spend cap | In-process counter | SQLite-backed across containers |

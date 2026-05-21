@@ -15,8 +15,7 @@ import {
   type Address,
   type WalletClient,
 } from "viem";
-import { base } from "viem/chains";
-import { atrRoundAbi } from "./abi.ts";
+import { atrRoundAbi, arcTestnet } from "./abi.ts";
 
 export interface SwapOrder {
   market: number;       // 0=PAYLOAD, 1=ALPHA
@@ -87,7 +86,7 @@ export async function submitCommit(
     abi: atrRoundAbi,
     functionName: "commitAction",
     args: [commitment],
-    chain: base,
+    chain: arcTestnet,
   } as any);
 }
 
@@ -110,7 +109,7 @@ export async function submitReveal(
       count,
       salt,
     ],
-    chain: base,
+    chain: arcTestnet,
   } as any);
 }
 
@@ -128,6 +127,6 @@ export async function submitClaimDeferredPayout(
     address: roundAddress,
     abi: atrRoundAbi,
     functionName: "claimDeferredPayout",
-    chain: base,
+    chain: arcTestnet,
   } as any);
 }

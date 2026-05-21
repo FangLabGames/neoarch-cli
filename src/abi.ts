@@ -5,6 +5,18 @@
 /// the CLI keeps working even if the round contract is upgraded server-side
 /// (you'd just need to bump this file's version when the on-chain ABI changes).
 
+import { defineChain } from "viem";
+
+/// Arc Testnet — the chain this CLI transacts on. Native gas = USDC (6dp).
+/// Using viem's `base` (chainId 8453) here would sign txs that Arc (5042002)
+/// rejects. Import this everywhere a viem client needs a chain.
+export const arcTestnet = defineChain({
+  id: 5042002,
+  name: "Arc Testnet",
+  nativeCurrency: { name: "USDC", symbol: "USDC", decimals: 6 },
+  rpcUrls: { default: { http: ["https://rpc.testnet.arc.network"] } },
+});
+
 export const atrRoundAbi = [
   // ─── Lifecycle (writes) ───────────────────────────────────────────
   {
@@ -133,6 +145,20 @@ export const atrRoundAbi = [
     inputs: [],
     outputs: [{ name: "amount", type: "uint256" }],
   },
+  {
+    type: "function",
+    name: "tickDuration",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+  {
+    type: "function",
+    name: "commitWindow",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ name: "", type: "uint256" }],
+  },
 ] as const;
 
 /// USDC ERC-20 — only the bits we need for entry-fee approval + balance check.
@@ -168,11 +194,13 @@ export const usdcAbi = [
 ] as const;
 
 // ─── Game constants ───────────────────────────────────────────────
-export const TICK_DURATION_SEC = 300;
-export const COMMIT_WINDOW_SEC = 180;
+// v1.6 FALLBACK defaults only — the CLI reads tickDuration()/commitWindow() from the
+// round contract at boot (timing is per-round). These apply only if that read fails.
+export const TICK_DURATION_SEC = 60;
+export const COMMIT_WINDOW_SEC = 36;
 export const DEFICIT_STEPS = 12; // was STARVATION_STEPS under v1.5 ontology
 export const STARVATION_STEPS = DEFICIT_STEPS; // back-compat alias; remove in v0.3
-export const ENTRY_FEE_USDC = 100n * 10n ** 6n; // 100 USDC with 6 decimals (Arc/USDC migration)
+export const ENTRY_FEE_USDC = 10n * 10n ** 6n; // 10 USDC with 6 decimals (v1.6 10x-down rescale)
 
 export const ROUND_STATUS = {
   CREATED: 0,

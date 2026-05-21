@@ -3,7 +3,7 @@
  * NeoArch Arena Player CLI — open-source Path A runtime.
  *
  * Joins an Agent Trade Royale round with your wallet and plays autonomously
- * for 48 hours (576 ticks @ 5 min each). Signs commit/reveal locally; private
+ * for the full round (~576 ticks; ~9.6h at the 60s default — per-round). Signs commit/reveal locally; private
  * key never leaves your machine.
  *
  * Usage:
@@ -28,9 +28,9 @@ import {
   type Hex,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { base } from "viem/chains";
 
 import {
+  arcTestnet,
   atrRoundAbi,
   usdcAbi,
   TICK_DURATION_SEC,
@@ -105,8 +105,8 @@ if (!["payload", "balanced", "craft"].includes(STRATEGY)) {
 
 // ─── Clients ────────────────────────────────────────────────────────
 const account = privateKeyToAccount(AGENT_PK);
-const publicClient = createPublicClient({ chain: base, transport: http(RPC) });
-const walletClient = createWalletClient({ account, chain: base, transport: http(RPC) });
+const publicClient = createPublicClient({ chain: arcTestnet, transport: http(RPC) });
+const walletClient = createWalletClient({ account, chain: arcTestnet, transport: http(RPC) });
 
 // ─── LLM (optional) ─────────────────────────────────────────────────
 let userStrategyPrompt = "";
@@ -131,7 +131,7 @@ const llm: LlmClient | null =
     : null;
 
 // ─── Banner ─────────────────────────────────────────────────────────
-log(`${C.cyan}NeoArch Arena Player${C.reset} v0.1.0`);
+log(`${C.cyan}NeoArch Arena Player${C.reset} v0.2.0`);
 log(`  agent:    ${C.bold}${account.address}${C.reset}`);
 log(`  round:    ${ROUND_ADDRESS}`);
 log(`  rpc:      ${RPC}`);
@@ -195,6 +195,27 @@ async function readTiming(): Promise<{ status: number; tick: bigint; lastTs: big
   return { status, tick, lastTs };
 }
 
+// v1.6: per-round tick timing, read from chain ONCE at boot (was hardcoded 300/180).
+// Falls back to the abi.ts defaults (60/36) if the read fails. The poll loop uses these.
+let tickDurationSec = TICK_DURATION_SEC;
+let commitWindowSec = COMMIT_WINDOW_SEC;
+
+async function loadRoundTiming(): Promise<void> {
+  try {
+    const [td, cw] = (await Promise.all([
+      publicClient.readContract({ address: ROUND_ADDRESS, abi: atrRoundAbi, functionName: "tickDuration" }),
+      publicClient.readContract({ address: ROUND_ADDRESS, abi: atrRoundAbi, functionName: "commitWindow" }),
+    ])) as [bigint, bigint];
+    if (td > 0n && cw > 0n && cw < td) {
+      tickDurationSec = Number(td);
+      commitWindowSec = Number(cw);
+    }
+    log(`  timing:   ${tickDurationSec}s tick / ${commitWindowSec}s commit (from chain)`);
+  } catch {
+    log(`  timing:   ${tickDurationSec}s tick / ${commitWindowSec}s commit (chain read failed — using defaults)`);
+  }
+}
+
 // ─── joinRound bootstrap ────────────────────────────────────────────
 async function ensureJoined(): Promise<void> {
   if (SKIP_JOIN) {
@@ -225,18 +246,18 @@ async function ensureJoined(): Promise<void> {
       args: [account.address, ROUND_ADDRESS],
     })) as bigint;
     if (allowance < ENTRY_FEE_USDC) {
-      log(`approving 100 USDC to round contract...`);
+      log(`approving ${fmtUsd(ENTRY_FEE_USDC)} USDC to round contract...`);
       if (!DRY_RUN) {
         const hash = await walletClient.writeContract({
           address: usdcAddr, abi: usdcAbi, functionName: "approve",
-          args: [ROUND_ADDRESS, ENTRY_FEE_USDC], chain: base,
+          args: [ROUND_ADDRESS, ENTRY_FEE_USDC], chain: arcTestnet,
         });
         await publicClient.waitForTransactionReceipt({ hash });
         log(`  approve tx: ${C.dim}${hash}${C.reset}`);
       }
     }
   } else {
-    log(`${C.yellow}low USDC balance (${fmtUsd(balance)} < 100)${C.reset} — assuming voucher / free-entry`);
+    log(`${C.yellow}low USDC balance (${fmtUsd(balance)} < ${fmtUsd(ENTRY_FEE_USDC)})${C.reset} — assuming voucher / free-entry`);
   }
 
   const strategyHash = computeStrategyHash();
@@ -245,7 +266,7 @@ async function ensureJoined(): Promise<void> {
   if (DRY_RUN) return;
   const hash = await walletClient.writeContract({
     address: ROUND_ADDRESS, abi: atrRoundAbi, functionName: "joinRound",
-    args: [strategyHash, HOSTING_MODE_LOCAL_CLI], chain: base,
+    args: [strategyHash, HOSTING_MODE_LOCAL_CLI], chain: arcTestnet,
   });
   await publicClient.waitForTransactionReceipt({ hash });
   log(`${C.green}joined${C.reset} tx: ${C.dim}${hash}${C.reset}`);
@@ -373,8 +394,8 @@ async function pollLoop(): Promise<void> {
 
       const now = BigInt(Math.floor(Date.now() / 1000));
       const tickStart = lastTs;
-      const commitDeadline = tickStart + BigInt(COMMIT_WINDOW_SEC);
-      const tickEnd = tickStart + BigInt(TICK_DURATION_SEC);
+      const commitDeadline = tickStart + BigInt(commitWindowSec);
+      const tickEnd = tickStart + BigInt(tickDurationSec);
       const execTick = tick + 1n;
 
       // New tick → drop any pending reveal we never got to submit.
@@ -416,6 +437,7 @@ async function pollLoop(): Promise<void> {
 (async () => {
   try {
     await ensureJoined();
+    await loadRoundTiming();
     await pollLoop();
     log(`${C.dim}exit.${C.reset}`);
   } catch (e: any) {

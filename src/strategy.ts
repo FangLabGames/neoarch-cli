@@ -33,10 +33,10 @@ const HUNDRED = 100n;
 /// set, and as fallback when the LLM call fails or hits the local spend cap.
 ///
 /// Survival override: if the agent has missed any ticks OR is below a 2-tick
-/// payload buffer (20 credits = 2× PAYLOAD_CONSUMPTION on the Arc/USDC 6dp
+/// payload buffer (2 credits = 2× PAYLOAD_CONSUMPTION on the Arc/USDC 6dp
 /// scale), dump 100% throughput into payload until recovered. Beats the
-/// contract's built-in 70/30 fallback on the survival axis.
-const PAYLOAD_SURVIVAL_THRESHOLD = 20n * 10n ** 6n; // 2× PAYLOAD_CONSUMPTION in 6dp USDC units
+/// contract's built-in 85/15 fallback on the survival axis.
+const PAYLOAD_SURVIVAL_THRESHOLD = 2n * 10n ** 6n; // 2× PAYLOAD_CONSUMPTION (1e6) in 6dp USDC units
 
 export function heuristicAction(
   snapshot: AgentSnapshot,
@@ -56,7 +56,7 @@ export function heuristicAction(
     case "payload":
       return { ePayloadProd: cap, eAlphaProd: 0n, eCraft: 0n, swaps: [] };
     case "balanced": {
-      const alpha = (cap * 30n) / HUNDRED;
+      const alpha = (cap * 15n) / HUNDRED;
       const payload = cap - alpha;
       return { ePayloadProd: payload, eAlphaProd: alpha, eCraft: 0n, swaps: [] };
     }
