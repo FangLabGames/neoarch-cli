@@ -174,6 +174,22 @@ async function readSnapshot(): Promise<AgentSnapshot> {
   })) as readonly [
     boolean, bigint, bigint, bigint, number, bigint, bigint, number, bigint, bigint, number, Hex, number,
   ];
+  const throughputCap = result[6];
+  // v1.14 (RV-CT-3): allocate against the regime/phase-modified, MAX_ENERGY_CAP-clamped
+  // allowance — revealAction validates against it, so a reveal summing to the raw
+  // throughputCap reverts (ThroughputMismatch) in a non-Expansion phase or a
+  // ThroughputSector regime. Pre-v1.14 rounds lack the view; fall back to the raw cap.
+  let throughputAllowance = throughputCap;
+  try {
+    throughputAllowance = (await publicClient.readContract({
+      address: ROUND_ADDRESS,
+      abi: atrRoundAbi,
+      functionName: "throughputAllowance",
+      args: [account.address],
+    })) as bigint;
+  } catch {
+    // old round impl without throughputAllowance() — keep the raw-cap fallback
+  }
   return {
     alive: result[0],
     payload: result[1],
@@ -181,7 +197,8 @@ async function readSnapshot(): Promise<AgentSnapshot> {
     alphaBalance: result[3],
     moduleTier: result[4],
     moduleDurability: result[5],
-    throughputCap: result[6],
+    throughputCap,
+    throughputAllowance,
     missCount: result[7],
   };
 }
@@ -301,7 +318,7 @@ async function decideAndCommit(execTick: bigint): Promise<void> {
       `payload=${fmtUsd(action.ePayloadProd)}  ` +
       `alpha=${fmtUsd(action.eAlphaProd)}  ` +
       `craft=${fmtUsd(action.eCraft)}  ` +
-      `(cap=${fmtUsd(snap.throughputCap)})`,
+      `(budget=${fmtUsd(snap.throughputAllowance)})`,
   );
 
   pending = { tick: Number(execTick), action, salt };

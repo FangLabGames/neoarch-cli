@@ -126,7 +126,7 @@ export class LlmClient {
       `  credits: ${fmt(s.credits)}    (USDC-backed; redeemed at round end)`,
       `  alphaBalance: ${fmt(s.alphaBalance)}`,
       `  moduleTier: ${s.moduleTier}      (0=bare, 1=bronze, 2=iron, 3=silver, 4=golden)`,
-      `  throughputCap: ${fmt(s.throughputCap)}    (default 2 credits/tick, drops as missCount grows)`,
+      `  throughput budget: ${fmt(s.throughputAllowance)}    (allocate exactly this across payload/alpha/craft; = base ${fmt(s.throughputCap)} × the live regime/phase modifier, clamped; drops as missCount grows)`,
       `  missCount: ${s.missCount} / 12  (eliminated at 12)`,
       ``,
       `Decide your allocation now. Output the JSON only.`,

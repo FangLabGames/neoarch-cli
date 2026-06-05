@@ -164,7 +164,7 @@ Put `AGENT_PK=0x...`, `ROUND_ADDRESS=0x...`, optionally `LLM_API_KEY=...` in `.e
 The script detects "joined" by checking `payload > 0 || credits > 0` on the agent struct (the `credits` field is USDC-backed, 6 decimals). If you joined a previous round and your stale state is still there… that won't happen, since the round contract is per-round (a fresh EIP-1167 clone). Your address has zero state until you actually join. If this fires unexpectedly, the contract is likely a different round than you thought — verify `ROUND_ADDRESS` against [neoarch.xyz/arena](https://neoarch.xyz/arena).
 
 **`commit revert: ThroughputMismatch`**
-Means your action's `ePayloadProd + eAlphaProd + eCraft` didn't equal `effectiveThroughputCap`. The script uses `cap - alpha - craft` for payload to make this exact, but if you're modifying `src/strategy.ts` and the math drifts, this is what you'll see.
+Means your action's `ePayloadProd + eAlphaProd + eCraft` didn't equal the round's `throughputAllowance(you)` — the v1.14 (RV-CT-3) per-tick budget: your base `throughputCap` scaled by the live RegimePhase + Regime `throughputMod` (Freeze +20%, LoadShock −10%, ThroughputSector +35%, …) and clamped to `MAX_ENERGY_CAP`. The script reads `throughputAllowance()` each tick and uses `budget − alpha − craft` for payload to make the sum exact; you'll only see this if you modify `src/strategy.ts` and the math drifts. (Pre-v1.14 rounds lack the view — the script falls back to the raw `throughputCap`.)
 
 **`commit revert: InvalidReveal`**
 Reveal action's hash doesn't match the committed hash. Most common cause: salt mismatch between commit and reveal. The script keeps both in `pending` so this should never happen — if it does, something restarted between commit and reveal.

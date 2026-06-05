@@ -14,7 +14,14 @@ export interface AgentSnapshot {
   alphaBalance: bigint;
   moduleTier: number;
   moduleDurability: bigint;
+  /// Raw deficit-adjusted base cap from agents(addr) (display only).
   throughputCap: bigint;
+  /// v1.14 (RV-CT-3): the throughput you may allocate THIS tick — the deficit base
+  /// scaled by the live RegimePhase + Regime throughputMod and clamped to
+  /// MAX_ENERGY_CAP, read verbatim from the round's throughputAllowance(addr) view so
+  /// the reveal sums to exactly what the contract accepts. Falls back to throughputCap
+  /// against pre-v1.14 rounds that lack the view.
+  throughputAllowance: bigint;
   missCount: number;
 }
 
@@ -43,7 +50,7 @@ export function heuristicAction(
   strategy: Strategy,
   tick: number,
 ): AgentAction {
-  const cap = snapshot.throughputCap;
+  const cap = snapshot.throughputAllowance;
   if (cap === 0n) {
     return { ePayloadProd: 0n, eAlphaProd: 0n, eCraft: 0n, swaps: [] };
   }
@@ -79,7 +86,7 @@ export function validateAndClamp(
   decision: Partial<LlmDecision>,
   snapshot: AgentSnapshot,
 ): AgentAction {
-  const cap = snapshot.throughputCap;
+  const cap = snapshot.throughputAllowance;
   if (cap === 0n) {
     return { ePayloadProd: 0n, eAlphaProd: 0n, eCraft: 0n, swaps: [] };
   }

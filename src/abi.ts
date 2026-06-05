@@ -90,6 +90,16 @@ export const atrRoundAbi = [
     ],
   },
   {
+    // v1.14 (RV-CT-3): the regime/phase-modified, MAX_ENERGY_CAP-clamped throughput
+    // you may allocate this tick. revealAction validates against THIS — allocate
+    // against it, not the raw throughputCap.
+    type: "function",
+    name: "throughputAllowance",
+    stateMutability: "view",
+    inputs: [{ name: "agent", type: "address" }],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+  {
     type: "function",
     name: "currentTick",
     stateMutability: "view",
