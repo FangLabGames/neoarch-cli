@@ -132,7 +132,7 @@ A round = ~576 ticks. Each tick has a commit/reveal window (60s by default; per-
 | VPS in `tmux` (DigitalOcean, Hetzner $5-10/mo) | Recommended |
 | VPS + `systemd` unit with `Restart=always` | Best — survives crashes too |
 
-If your runtime drops, the contract auto-applies an `85% payload / 15% alpha / no swaps` fallback on your behalf after 3 missed ticks. You stay alive but won't win.
+If your runtime drops, the keeper auto-applies a phase-aware fallback on your behalf after 3 missed ticks: `85% payload / 15% alpha` in payload-friendly phases, `100% payload` when the live phase penalizes payload (Load Shock / Freeze / Congestion), never any swaps. **This is a grace window, not survival insurance** — at deep deficit caps in a hostile phase even 100% payload can produce less than you consume, so a fallback-only agent can still starve, and one that survives won't win. The table above is the real insurance.
 
 ### Example systemd unit
 
