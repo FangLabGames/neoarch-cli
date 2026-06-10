@@ -108,6 +108,13 @@ export const atrRoundAbi = [
   },
   {
     type: "function",
+    name: "endTick",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+  {
+    type: "function",
     name: "lastTickTimestamp",
     stateMutability: "view",
     inputs: [],
@@ -118,7 +125,10 @@ export const atrRoundAbi = [
     name: "roundStatus",
     stateMutability: "view",
     inputs: [],
-    outputs: [{ name: "", type: "uint8" }], // 0=CREATED 1=REGISTRATION 2=ACTIVE 3=RESOLVED
+    // 0=CREATED 1=REGISTRATION 2=ACTIVE 3=RESOLVED 4=CANCELLED 5=SEEDING
+    // (SEC-SEED-1: SEEDING = joins frozen, round seed being drawn; the round
+    // goes ACTIVE in the same tx that delivers the seed.)
+    outputs: [{ name: "", type: "uint8" }],
   },
   {
     type: "function",
@@ -217,6 +227,89 @@ export const ROUND_STATUS = {
   REGISTRATION: 1,
   ACTIVE: 2,
   RESOLVED: 3,
+  CANCELLED: 4,
+  // SEC-SEED-1 (2026-06-10): two-phase start. Joins freeze, the round seed is
+  // drawn (commit-reveal / VRF), and the round goes ACTIVE in the same tx the
+  // seed arrives — so the schedule is unknowable while you can still join.
+  SEEDING: 5,
 } as const;
 
 export const HOSTING_MODE_LOCAL_CLI = 0;
+
+// ─── ATRModuleMarket (ECON-BRIDGE-2, 2026-06-10) ──────────────────
+// In-round English auction for crafted modules, settled entirely in IN-GAME
+// CREDITS via the round's internal ledger (no USDC moves). Listing locks your
+// module immediately; bids escrow credits and auto-refund when outbid; the
+// high bid at the deadline wins. Min increment 5%; max duration 1h.
+export const MODULE_MARKET_ADDRESS =
+  "0x201e3929b09Eb664672f34C86dE0e802a1DBf94E" as const;
+
+export const moduleMarketAbi = [
+  {
+    type: "function",
+    name: "listModule",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "round", type: "address" },
+      { name: "minPrice", type: "uint256" },
+      { name: "duration", type: "uint256" },
+    ],
+    outputs: [{ name: "auctionId", type: "uint256" }],
+  },
+  {
+    type: "function",
+    name: "bid",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "auctionId", type: "uint256" },
+      { name: "amount", type: "uint256" },
+    ],
+    outputs: [],
+  },
+  {
+    type: "function",
+    name: "settle",
+    stateMutability: "nonpayable",
+    inputs: [{ name: "auctionId", type: "uint256" }],
+    outputs: [],
+  },
+  {
+    type: "function",
+    name: "nextAuctionId",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+  {
+    type: "function",
+    name: "activeAuctionOf",
+    stateMutability: "view",
+    inputs: [
+      { name: "round", type: "address" },
+      { name: "seller", type: "address" },
+    ],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+  {
+    type: "function",
+    name: "listings",
+    stateMutability: "view",
+    inputs: [{ name: "", type: "uint256" }],
+    outputs: [
+      { name: "round", type: "address" },
+      { name: "seller", type: "address" },
+      { name: "tier", type: "uint8" },
+      { name: "durability", type: "uint256" },
+      { name: "minPrice", type: "uint256" },
+      { name: "endTime", type: "uint256" },
+      { name: "highBidder", type: "address" },
+      { name: "highBid", type: "uint256" },
+      { name: "settled", type: "bool" },
+    ],
+  },
+] as const;
+
+/// Mirrors ATRModuleMarket.MIN_BID_INCREMENT_BPS (5%).
+export const MODULE_MARKET_MIN_INCREMENT_BPS = 500n;
+/// Mirrors ATRModuleMarket.MAX_DURATION (1 hour).
+export const MODULE_MARKET_MAX_DURATION_SEC = 3600;

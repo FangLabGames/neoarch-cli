@@ -32,16 +32,17 @@ bun run arena-player.ts --llm anthropic --cap-usd 5
 bun run arena-player.ts --llm anthropic --prompt ./my-strategy.md --cap-usd 5
 ```
 
-The script handles `joinRound`, every commit/reveal cycle, and `claimPrize` at the end. Keep it running for the full round (~9.6h at the 60s default; use `tmux`, `screen`, or a small VPS — see [Staying online](#staying-online) below).
+The script handles `joinRound`, every commit/reveal cycle, module-market trades (LLM mode), and `claimPrize` at the end. Keep it running for the full round (~9.6h at the 60s default; use `tmux`, `screen`, or a small VPS — see [Staying online](#staying-online) below).
 
 ---
 
 ## What it does
 
-1. **Joins the round** — calls `joinRound(strategyHash, hostingMode=0)` after approving the 10 USDC entry fee (skipped automatically if the round is free-entry / voucher-only). The `strategyHash` commits you to either your heuristic preset or your custom LLM prompt for the entire round.
+1. **Joins the round** — calls `joinRound(strategyHash, hostingMode=0)` after approving the 10 USDC entry fee (skipped automatically if the round is free-entry / voucher-only). The `strategyHash` commits you to either your heuristic preset or your custom LLM prompt for the entire round. **SEC-SEED-1 (2026-06-10): joins freeze the moment the operator starts the round** — the round enters a short `SEEDING` status while the round seed is drawn (commit-reveal / VRF), then goes `ACTIVE` in the same tx the seed lands. Nobody — including the operator — can know the regime/phase schedule while registration is still open, so join timing carries no information edge.
 2. **Each tick** — reads your `AgentState` from chain, picks an allocation (LLM if a key is set; heuristic otherwise), commits in the commit window, reveals in the reveal window. Tick/window lengths are per-round (read `tickDuration()`/`commitWindow()` from chain; 60s/36s by default). Fully on-chain. No indexer, no NeoArch backend.
-3. **Survival override** — if `missCount > 0` or your payload stockpile drops below ~2 (a 2-tick buffer), the script overrides your strategy and dumps 100% throughput into payload until you recover. You can disable this only by editing `src/strategy.ts`.
-4. **At round end** — when `roundStatus` returns `RESOLVED`, polls `pendingPayouts(your-wallet)` and calls `claimDeferredPayout()` if non-zero (covers both regular survivors and the pull-payment fallback path). USDC lands in your wallet.
+3. **Module market (LLM mode)** — the in-round `ATRModuleMarket` English auction, settled entirely in **in-game credits** (no USDC moves mid-round). When you own a crafted module the LLM may **list** it (`workOrders`); when you own none, open auctions in your round are fed into the prompt and the LLM may **bid** (`moduleBids`) — the script bids the minimum the contract accepts (reserve, or high bid + 5%) up to the LLM's stated ceiling, and auto-settles any auction you sold or won once its deadline passes. Buying a tier 2-4 module for a few credits is usually far cheaper than crafting one from scratch.
+4. **Survival override** — if `missCount > 0` or your payload stockpile drops below ~2 (a 2-tick buffer), the script overrides your strategy and dumps 100% throughput into payload until you recover. You can disable this only by editing `src/strategy.ts`.
+5. **At round end** — when `roundStatus` returns `RESOLVED`, polls `pendingPayouts(your-wallet)` and calls `claimDeferredPayout()` if non-zero (covers both regular survivors and the pull-payment fallback path). USDC lands in your wallet. If the round is `CANCELLED` (e.g. the seed never arrived), the contract auto-refunds your entry (9.5 USDC; the 0.5 treasury rake is non-refundable) and the script exits.
 
 ---
 
@@ -92,8 +93,8 @@ When `LLM_API_KEY` + `--llm <provider>` are both set, every tick the script:
 
 1. Reads your `AgentState` from chain.
 2. POSTs `(systemPrompt, userPrompt)` directly to the provider's endpoint (e.g. `https://api.anthropic.com/v1/messages`).
-3. Parses the JSON response: `{"payloadPct": X, "alphaPct": Y, "craftPct": Z}` summing to 100.
-4. Validates + clamps the values, computes the commitment, signs `commitAction` + `revealAction`.
+3. Parses the JSON response: `{"payloadPct": X, "alphaPct": Y, "craftPct": Z, "swaps": [...], "workOrders": [...], "moduleBids": [...]}` (percentages sum to 100; the three arrays are optional — AMM swaps, a module listing, a module bid).
+4. Validates + clamps the values, computes the commitment, signs `commitAction` + `revealAction`. Market actions (listing/bid) fire only after the commit lands, so they can never cost you a tick.
 5. Tracks the cost in microUSD (`tokens × $/M-tokens`). Spend cap is enforced **locally in this process** — no telemetry, no upload.
 
 **Cap reached** → script silently falls back to the heuristic for the rest of the round. Set `--cap-usd 0` to disable the cap if you trust your provider's billing controls.

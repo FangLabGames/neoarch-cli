@@ -25,11 +25,40 @@ export interface AgentSnapshot {
   missCount: number;
 }
 
+/// LLM-decided module listing (sell side of the in-round module market).
+/// Translates to ATRModuleMarket.listModule(round, minPriceCredits, duration)
+/// — an English auction settled in IN-GAME CREDITS between agents of the same
+/// round. Listing locks your module immediately (you lose its production
+/// multiplier the same tick); one listing per round.
+export interface WorkOrderIntent {
+  kind: "module-listing";
+  /// Reserve price in in-game credits, 6-decimal units.
+  minPriceCredits: bigint;
+  /// Auction window seconds; contract caps at 1h, runtime clamps further.
+  durationSeconds: number;
+}
+
+/// LLM-decided bid on another agent's module auction (buy side). The LLM
+/// names the auction + a CEILING; the runtime bids the minimum the contract
+/// accepts (minPrice, or highBid + 5%) and never exceeds the ceiling. Bids
+/// escrow from your in-game credits and auto-refund when outbid. You cannot
+/// bid while you own a module (delivery would fail at settle) or on your own
+/// listing.
+export interface ModuleBidIntent {
+  kind: "module-bid";
+  auctionId: bigint;
+  maxBidCredits: bigint;
+}
+
 export interface LlmDecision {
   payloadPct: number;
   alphaPct: number;
   craftPct: number;
   swaps: SwapOrder[];
+  /// Optional — at most 1 per tick (and 1 listing per round).
+  workOrders?: WorkOrderIntent[];
+  /// Optional — at most 1 per tick.
+  moduleBids?: ModuleBidIntent[];
 }
 
 export type Strategy = "payload" | "balanced" | "craft";
@@ -113,13 +142,22 @@ export function validateAndClamp(
     return { ePayloadProd: cap, eAlphaProd: 0n, eCraft: 0n, swaps: [] };
   }
 
-  const swaps: SwapOrder[] = (decision.swaps ?? [])
-    .filter((s) => s && typeof s === "object")
-    .filter((s) => Number.isInteger(s.market) && s.market >= 0 && s.market <= 1)
-    .filter((s) => Number.isInteger(s.kind) && s.kind >= 0 && s.kind <= 1)
-    .filter((s) => typeof s.amount === "bigint" && s.amount >= 0n)
-    .filter((s) => typeof s.limitAmount === "bigint" && s.limitAmount >= 0n)
-    .slice(0, 3);
+  // BUGFIX (ported from the managed runtime, 2026-05-27): JSON.parse on the
+  // LLM response yields plain `number` for amount/limitAmount — the old
+  // `typeof s.amount === "bigint"` filter silently dropped EVERY LLM swap,
+  // so agents could never trade on the AMM. Coerce via toNonNegBigint.
+  const swaps: SwapOrder[] = [];
+  for (const s of decision.swaps ?? []) {
+    if (swaps.length >= 3) break;
+    if (!s || typeof s !== "object") continue;
+    const o = s as unknown as Record<string, unknown>;
+    if (!Number.isInteger(o.market) || (o.market as number) < 0 || (o.market as number) > 1) continue;
+    if (!Number.isInteger(o.kind) || (o.kind as number) < 0 || (o.kind as number) > 1) continue;
+    const amount = toNonNegBigint(o.amount);
+    if (amount === null || amount === 0n) continue;
+    const limitAmount = toNonNegBigint(o.limitAmount) ?? 0n;
+    swaps.push({ market: o.market as number, kind: o.kind as number, amount, limitAmount });
+  }
 
   return {
     ePayloadProd: payloadThroughput,
@@ -127,6 +165,76 @@ export function validateAndClamp(
     eCraft: craftThroughput,
     swaps,
   };
+}
+
+/// Coerce an LLM-emitted JSON value to a non-negative integer bigint, or null.
+/// LLMs emit JSON `number` (never `bigint`) and sometimes digits-only strings.
+/// Rejects NaN, Infinity, fractional, negative, scientific notation, objects.
+export function toNonNegBigint(v: unknown): bigint | null {
+  if (typeof v === "bigint") return v >= 0n ? v : null;
+  if (typeof v === "number") {
+    if (!Number.isFinite(v) || v < 0 || !Number.isInteger(v)) return null;
+    return BigInt(v);
+  }
+  if (typeof v === "string") {
+    if (!/^[0-9]+$/.test(v)) return null;
+    try {
+      return BigInt(v);
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+// ─── Module-market intent validation ───────────────────────────────
+
+export const MIN_PRICE_CREDITS = 100_000n;     // 0.10 credits
+export const MAX_PRICE_CREDITS = 100_000_000n; // 100 credits sanity cap
+export const MIN_AUCTION_DURATION_SECONDS = 5 * 60;
+export const MAX_AUCTION_DURATION_SECONDS = 3600; // ATRModuleMarket.MAX_DURATION
+
+/// Sanitize workOrders (listings). At most 1 per tick; clamps price+duration.
+export function validateWorkOrders(raw: unknown): WorkOrderIntent[] {
+  if (!Array.isArray(raw)) return [];
+  const out: WorkOrderIntent[] = [];
+  for (const w of raw) {
+    if (out.length >= 1) break;
+    if (!w || typeof w !== "object") continue;
+    const obj = w as Record<string, unknown>;
+    if (obj.kind !== "module-listing") continue;
+    let price = toNonNegBigint(obj.minPriceCredits);
+    if (price === null) continue;
+    if (price < MIN_PRICE_CREDITS) price = MIN_PRICE_CREDITS;
+    if (price > MAX_PRICE_CREDITS) price = MAX_PRICE_CREDITS;
+    const durRaw = toNonNegBigint(obj.durationSeconds);
+    if (durRaw === null) continue;
+    const dur = Math.max(
+      MIN_AUCTION_DURATION_SECONDS,
+      Math.min(MAX_AUCTION_DURATION_SECONDS, Number(durRaw)),
+    );
+    out.push({ kind: "module-listing", minPriceCredits: price, durationSeconds: dur });
+  }
+  return out;
+}
+
+/// Sanitize moduleBids. At most 1 per tick; ceiling clamped to the sanity cap.
+export function validateModuleBids(raw: unknown): ModuleBidIntent[] {
+  if (!Array.isArray(raw)) return [];
+  const out: ModuleBidIntent[] = [];
+  for (const b of raw) {
+    if (out.length >= 1) break;
+    if (!b || typeof b !== "object") continue;
+    const obj = b as Record<string, unknown>;
+    if (obj.kind !== "module-bid") continue;
+    const auctionId = toNonNegBigint(obj.auctionId);
+    if (auctionId === null || auctionId === 0n) continue;
+    let ceiling = toNonNegBigint(obj.maxBidCredits);
+    if (ceiling === null || ceiling === 0n) continue;
+    if (ceiling > MAX_PRICE_CREDITS) ceiling = MAX_PRICE_CREDITS;
+    out.push({ kind: "module-bid", auctionId, maxBidCredits: ceiling });
+  }
+  return out;
 }
 
 function clamp(n: number, lo: number, hi: number): number {

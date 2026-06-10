@@ -6,6 +6,7 @@
 /// we silently fall back to the heuristic. No telemetry, no upload.
 
 import type { AgentSnapshot, LlmDecision } from "./strategy.ts";
+import type { OpenAuction } from "./module-market.ts";
 
 export type Provider = "anthropic" | "openai" | "compatible";
 
@@ -69,14 +70,28 @@ const BASE_SYSTEM_PROMPT = `You are an autonomous trading agent in NeoArch — A
 
 Each tick, allocate your throughput budget across three production targets and optionally swap payload/alpha for credits on the on-chain AMM. You consume payload each tick to stay alive; if you accumulate 12 missed ticks (no payload eaten) the contract eliminates you.
 
+MODULE MARKET (in-round, settled in your in-game credits — no outside money):
+- SELL: if you own a crafted module (moduleTier > 0) you may list it via workOrders. Listing locks the module IMMEDIATELY (you lose its production multiplier the same tick) and is one-shot per round. The auction is English-style: bids start at minPriceCredits, each later bid must exceed the previous by 5%, highest bid at the deadline wins and lands in YOUR credits.
+- BUY: if you own NO module, your state may include OPEN MODULE AUCTIONS. Buying a tier 2-4 module for a few credits is usually far cheaper than many ticks of craftPct, and the production multiplier applies as soon as the auction settles. Emit a moduleBids entry with the auctionId and your maxBidCredits CEILING — the runtime bids the minimum needed to lead (never your ceiling unless required), your credits are escrowed only while you lead, and you are auto-refunded the moment someone outbids you. Don't bid above what the extra production is worth over the round's remaining ticks; never re-bid an auction marked "you lead".
+
 Output ONLY a JSON object matching this exact schema — no prose, no code-fence:
 {
   "payloadPct": <number 0-100>,
   "alphaPct":   <number 0-100>,
   "craftPct":   <number 0-100>,
-  "swaps":      []
+  "swaps": [
+    { "market": <0=payload, 1=alpha>, "kind": <0=sell for credits, 1=buy with credits>, "amount": <integer, 6-decimal>, "limitAmount": <integer, 6-decimal> }
+  ],
+  "workOrders": [
+    { "kind": "module-listing", "minPriceCredits": <integer, 6-decimal credits>, "durationSeconds": <integer 300-3600> }
+  ],
+  "moduleBids": [
+    { "kind": "module-bid", "auctionId": <integer from OPEN MODULE AUCTIONS>, "maxBidCredits": <integer, 6-decimal credits> }
+  ]
 }
-Percentages must sum to 100. The swaps array can be empty for now.`;
+Percentages must sum to 100. swaps / workOrders / moduleBids may be empty arrays. Max 3 swaps, 1 workOrder, 1 moduleBid per tick.
+All amounts are 6-decimal integers (2500000 = 2.5) — plain integers, no underscores or scientific notation.
+For a SELL swap, limitAmount is the minimum credits you'll accept (0 = any). For a BUY swap, limitAmount is the max credits you'll spend (must be > 0 or the buy is a no-op).`;
 
 export class LlmClient {
   private spend: SpendState = { totalMicro: 0, events: 0, capReached: false };
@@ -95,10 +110,14 @@ export class LlmClient {
   ///   - HTTP error
   ///   - JSON parse failure
   /// Caller should treat null as "use heuristic for this tick".
-  async callForDecision(snapshot: AgentSnapshot, tick: number): Promise<LlmDecision | null> {
+  async callForDecision(
+    snapshot: AgentSnapshot,
+    tick: number,
+    openAuctions: OpenAuction[] = [],
+  ): Promise<LlmDecision | null> {
     if (this.spend.capReached) return null;
 
-    const userPrompt = this.buildUserPrompt(snapshot, tick);
+    const userPrompt = this.buildUserPrompt(snapshot, tick, openAuctions);
     const systemPrompt =
       this.config.systemPrompt.trim().length > 0
         ? `${BASE_SYSTEM_PROMPT}\n\nADDITIONAL STRATEGY GUIDANCE FROM YOUR OPERATOR:\n${this.config.systemPrompt}`
@@ -115,10 +134,23 @@ export class LlmClient {
     }
   }
 
-  private buildUserPrompt(s: AgentSnapshot, tick: number): string {
+  private buildUserPrompt(s: AgentSnapshot, tick: number, openAuctions: OpenAuction[] = []): string {
     // Arc/USDC migration: credits + payload + alpha + throughput are all 6dp
     // (matches USDC). 1 credit = 1 USDC at round-end redemption.
     const fmt = (v: bigint) => (Number(v) / 1e6).toFixed(2);
+    const auctionLines =
+      openAuctions.length > 0
+        ? [
+            ``,
+            `OPEN MODULE AUCTIONS (this round; you own no module, so you may bid):`,
+            ...openAuctions.map(
+              (a) =>
+                `  auctionId=${a.auctionId.toString()} tier=${a.tier} durability=${a.durability.toString()}` +
+                ` minNextBid=${a.minNextBid.toString()} (${fmt(a.minNextBid)} credits)` +
+                ` closesIn=${a.secondsLeft}s${a.weLead ? " [you lead]" : ""}`,
+            ),
+          ]
+        : [];
     return [
       `STATE (tick ${tick}):`,
       `  alive: ${s.alive}`,
@@ -128,6 +160,7 @@ export class LlmClient {
       `  moduleTier: ${s.moduleTier}      (0=bare, 1=bronze, 2=iron, 3=silver, 4=golden)`,
       `  throughput budget: ${fmt(s.throughputAllowance)}    (allocate exactly this across payload/alpha/craft; = base ${fmt(s.throughputCap)} × the live regime/phase modifier, clamped; drops as missCount grows)`,
       `  missCount: ${s.missCount} / 12  (eliminated at 12)`,
+      ...auctionLines,
       ``,
       `Decide your allocation now. Output the JSON only.`,
     ].join("\n");
@@ -145,7 +178,7 @@ export class LlmClient {
       },
       body: JSON.stringify({
         model,
-        max_tokens: 256,
+        max_tokens: 512, // headroom for the full schema (allocations + swaps + a workOrder/moduleBid); 256 truncated rich responses → parse-fail → fallback
         system: systemPrompt,
         messages: [{ role: "user", content: userPrompt }],
       }),
@@ -176,7 +209,7 @@ export class LlmClient {
       },
       body: JSON.stringify({
         model,
-        max_tokens: 256,
+        max_tokens: 512, // headroom for the full schema (allocations + swaps + a workOrder/moduleBid); 256 truncated rich responses → parse-fail → fallback
         messages: [
           { role: "system", content: systemPrompt },
           { role: "user", content: userPrompt },

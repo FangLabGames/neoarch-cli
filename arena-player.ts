@@ -55,10 +55,22 @@ const fmtUsd = (v: bigint) => formatUnits(v, 6);
 import {
   type AgentSnapshot,
   type Strategy,
+  type WorkOrderIntent,
+  type ModuleBidIntent,
   heuristicAction,
   validateAndClamp,
+  validateWorkOrders,
+  validateModuleBids,
 } from "./src/strategy.ts";
 import { LlmClient, type Provider, formatSpend } from "./src/llm.ts";
+import {
+  type OpenAuction,
+  scanAuctions,
+  bidTargets,
+  dispatchListing,
+  dispatchBid,
+  settleDueAuctions,
+} from "./src/module-market.ts";
 
 // ─── Pretty logging ─────────────────────────────────────────────────
 const C = {
@@ -131,7 +143,7 @@ const llm: LlmClient | null =
     : null;
 
 // ─── Banner ─────────────────────────────────────────────────────────
-log(`${C.cyan}NeoArch Arena Player${C.reset} v0.2.0`);
+log(`${C.cyan}NeoArch Arena Player${C.reset} v0.3.0`);
 log(`  agent:    ${C.bold}${account.address}${C.reset}`);
 log(`  round:    ${ROUND_ADDRESS}`);
 log(`  rpc:      ${RPC}`);
@@ -216,17 +228,22 @@ async function readTiming(): Promise<{ status: number; tick: bigint; lastTs: big
 // Falls back to the abi.ts defaults (60/36) if the read fails. The poll loop uses these.
 let tickDurationSec = TICK_DURATION_SEC;
 let commitWindowSec = COMMIT_WINDOW_SEC;
+// endTick for the module-market listing clamp (an auction must settle before
+// the round resolves). SEC-SEED-1: 0 until the seed lands — re-read lazily.
+let endTickNum = 0;
 
 async function loadRoundTiming(): Promise<void> {
   try {
-    const [td, cw] = (await Promise.all([
+    const [td, cw, et] = (await Promise.all([
       publicClient.readContract({ address: ROUND_ADDRESS, abi: atrRoundAbi, functionName: "tickDuration" }),
       publicClient.readContract({ address: ROUND_ADDRESS, abi: atrRoundAbi, functionName: "commitWindow" }),
-    ])) as [bigint, bigint];
+      publicClient.readContract({ address: ROUND_ADDRESS, abi: atrRoundAbi, functionName: "endTick" }),
+    ])) as [bigint, bigint, bigint];
     if (td > 0n && cw > 0n && cw < td) {
       tickDurationSec = Number(td);
       commitWindowSec = Number(cw);
     }
+    endTickNum = Number(et);
     log(`  timing:   ${tickDurationSec}s tick / ${commitWindowSec}s commit (from chain)`);
   } catch {
     log(`  timing:   ${tickDurationSec}s tick / ${commitWindowSec}s commit (chain read failed — using defaults)`);
@@ -297,14 +314,32 @@ async function decideAndCommit(execTick: bigint): Promise<void> {
     process.exit(0);
   }
 
+  // Module market: surface open auctions to the LLM only when we can
+  // actually take delivery (no module held). Best-effort.
+  let openAuctions: OpenAuction[] = [];
+  if (llm && snap.moduleTier === 0) {
+    openAuctions = bidTargets(await scanAuctions(publicClient, ROUND_ADDRESS, account.address));
+    if (openAuctions.length > 0) {
+      log(
+        `${C.dim}module market: ${openAuctions.length} open auction(s): ` +
+          openAuctions.map((a) => `#${a.auctionId} t${a.tier}@${fmtUsd(a.minNextBid)}${a.weLead ? "(lead)" : ""}`).join(" ") +
+          C.reset,
+      );
+    }
+  }
+
   let action: AgentAction;
+  let workOrders: WorkOrderIntent[] = [];
+  let moduleBids: ModuleBidIntent[] = [];
   if (llm) {
-    const decision = await llm.callForDecision(snap, Number(execTick));
+    const decision = await llm.callForDecision(snap, Number(execTick), openAuctions);
     if (!decision) {
       action = heuristicAction(snap, STRATEGY, Number(execTick));
       log(`${C.dim}LLM returned null — heuristic fallback${C.reset}`);
     } else {
       action = validateAndClamp(decision, snap);
+      workOrders = snap.moduleTier > 0 ? validateWorkOrders(decision.workOrders) : [];
+      moduleBids = snap.moduleTier === 0 ? validateModuleBids(decision.moduleBids) : [];
     }
   } else {
     action = heuristicAction(snap, STRATEGY, Number(execTick));
@@ -330,6 +365,45 @@ async function decideAndCommit(execTick: bigint): Promise<void> {
   } catch (e: any) {
     log(`${C.red}commit revert: ${e.shortMessage ?? e.message ?? e}${C.reset}`);
     pending = null;
+    return;
+  }
+
+  // Module-market actions ride AFTER a successful commit (never risk the
+  // tick), fire-and-forget.
+  if (workOrders.length > 0 || moduleBids.length > 0) {
+    dispatchMarketActions(snap, Number(execTick), workOrders, moduleBids).catch(() => {});
+  }
+}
+
+/// Fire LLM-decided module-market actions: one listing (sell) or one bid (buy).
+async function dispatchMarketActions(
+  snap: AgentSnapshot,
+  execTick: number,
+  workOrders: WorkOrderIntent[],
+  moduleBids: ModuleBidIntent[],
+): Promise<void> {
+  // SEC-SEED-1: endTick is 0 until the seed lands; re-read lazily once ACTIVE.
+  if (endTickNum === 0) {
+    try {
+      endTickNum = Number(
+        await publicClient.readContract({ address: ROUND_ADDRESS, abi: atrRoundAbi, functionName: "endTick" }),
+      );
+    } catch {}
+  }
+  if (workOrders.length > 0 && endTickNum > 0) {
+    const remainingSec = Math.max(0, (endTickNum - execTick) * tickDurationSec);
+    const tx = await dispatchListing(
+      walletClient, publicClient, ROUND_ADDRESS, account.address,
+      workOrders[0], snap, remainingSec,
+    );
+    if (tx) log(`${C.green}LISTED${C.reset} module tier=${snap.moduleTier} minPrice=${fmtUsd(workOrders[0].minPriceCredits)} tx: ${C.dim}${tx}${C.reset}`);
+  }
+  if (moduleBids.length > 0) {
+    const amount = await dispatchBid(
+      walletClient, publicClient, ROUND_ADDRESS, account.address,
+      moduleBids[0], snap,
+    );
+    if (amount !== null) log(`${C.green}BID${C.reset} ${fmtUsd(amount)} credits on auction #${moduleBids[0].auctionId} (ceiling ${fmtUsd(moduleBids[0].maxBidCredits)})`);
   }
 }
 
@@ -394,6 +468,8 @@ async function handleResolved(): Promise<void> {
 // ─── Main poll loop ─────────────────────────────────────────────────
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+let lastMarketSweep = 0;
+
 async function pollLoop(): Promise<void> {
   while (true) {
     try {
@@ -403,10 +479,36 @@ async function pollLoop(): Promise<void> {
         await handleResolved();
         return;
       }
+      if (status === ROUND_STATUS.CANCELLED) {
+        log(`${C.yellow}round CANCELLED${C.reset} — the contract auto-refunded your entry (9.5 USDC). exiting.`);
+        return;
+      }
+      if (status === ROUND_STATUS.SEEDING) {
+        // SEC-SEED-1: joins are frozen and the round seed is being drawn
+        // (commit-reveal / VRF). The round goes ACTIVE in the same tx the
+        // seed lands — nothing to do but wait.
+        log(`${C.dim}seed being drawn (joins frozen) — round starts the moment it lands…${C.reset}`);
+        await sleep(10_000);
+        continue;
+      }
       if (status !== ROUND_STATUS.ACTIVE) {
         log(`waiting for round to start (status=${status})…`);
         await sleep(15_000);
         continue;
+      }
+
+      // Module market housekeeping (LLM mode only): settle any past-deadline
+      // auction we sold or are winning, so the module/proceeds arrive without
+      // waiting for the keeper's backup sweep. At most once a minute.
+      const nowMs = Date.now();
+      if (llm && !DRY_RUN && nowMs - lastMarketSweep > 60_000) {
+        lastMarketSweep = nowMs;
+        scanAuctions(publicClient, ROUND_ADDRESS, account.address)
+          .then((all) => settleDueAuctions(walletClient, all))
+          .then((ids) => {
+            for (const id of ids) log(`${C.green}SETTLED${C.reset} module auction #${id}`);
+          })
+          .catch(() => {});
       }
 
       const now = BigInt(Math.floor(Date.now() / 1000));
