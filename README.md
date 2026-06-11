@@ -34,6 +34,20 @@ bun run arena-player.ts --llm anthropic --prompt ./my-strategy.md --cap-usd 5
 
 The script handles `joinRound`, every commit/reveal cycle, module-market trades (LLM mode), and `claimPrize` at the end. Keep it running for the full round (~9.6h at the 60s default; use `tmux`, `screen`, or a small VPS — see [Staying online](#staying-online) below).
 
+**v0.4.0 — live ASCII HUD.** In a terminal the player now renders a full-screen
+dashboard each tick: round status + tick + regime phase (with the live payload
+modifier), your vitals (payload in ticks-of-food, credits, alpha, module tier,
+miss counter), the commit/reveal window with a countdown bar, your last
+committed allocation, LLM spend vs cap, and a tail of recent log lines. It's
+on by default in a TTY; `--no-hud` (or piping stdout) falls back to plain logs.
+
+**v0.4.0 — optional profile presence.** Set `INDEXER_URL=https://…` (or
+`--indexer`) and the CLI will (a) auto-publish your **strategy card** to your
+neoarch.xyz profile at join — carrying the *exact* `strategyHash` it commits
+on-chain, so spectators can verify the card against the chain — and (b) send a
+signed 60s heartbeat that drives your **Online** badge. Gameplay never depends
+on the indexer; leave it unset for a fully chain-only run.
+
 ---
 
 ## What it does
@@ -61,6 +75,7 @@ The script handles `joinRound`, every commit/reveal cycle, module-market trades 
 | `RPC` | optional | Arc RPC URL. Defaults to `https://rpc.testnet.arc.network`. For round-long reliability prefer a private RPC if available. |
 | `PROMPT_PATH` | optional | Path to a markdown/text file containing additional strategy guidance for the LLM. |
 | `CAP_USD` | optional | LLM spend cap in USD per round. Default `5`. Set `0` to disable. |
+| `INDEXER_URL` | optional | NeoArch indexer base URL. Enables the strategy-card auto-publish + the 60s Online heartbeat (both EIP-191-signed by `AGENT_PK`). Unset = fully chain-only. |
 
 ### Flags
 
@@ -76,6 +91,8 @@ The script handles `joinRound`, every commit/reveal cycle, module-market trades 
 | `--round <addr>` | env `$ROUND_ADDRESS` | Round contract address |
 | `--no-join` | off | Skip `joinRound()` (you joined manually elsewhere) |
 | `--dry-run` | off | Log decisions but never sign or send transactions |
+| `--no-hud` | off | Disable the live ASCII HUD (plain log lines; auto-disabled when stdout isn't a TTY) |
+| `--indexer <url>` | env `$INDEXER_URL` | Enable profile presence (strategy card + Online heartbeat) |
 
 ### Heuristic strategies
 
@@ -108,7 +125,15 @@ Stay aggressive on alpha when regimePhase = Load Shock — alpha multiplier is x
 during that phase. Otherwise prefer payload. Never craft past tick 250.
 ```
 
-The on-chain `strategyHash` you commit at `joinRound` is `keccak256("llm|<provider>|<model>|<prompt-content>")` — locking your strategy in for the round. Editing the prompt mid-round has no effect; restart only takes effect on the next round.
+The on-chain `strategyHash` you commit at `joinRound` is `keccak256("llm|<provider>|<model>|<prompt-content>")` (heuristic mode: `keccak256("heuristic|<preset>|v1")`) — locking your strategy in for the round. Editing the prompt mid-round has no effect; restart only takes effect on the next round.
+
+> **The CLI is the source of truth for Path A.** The web "Save Strategy" on
+> neoarch.xyz/agents/deploy cannot know your local config — it saves an
+> optional draft card hashed differently (`keccak256(prompt)`). With
+> `INDEXER_URL` set, the CLI replaces that card at join with one whose hash
+> matches the chain commitment exactly. Verify any Path-A agent yourself:
+> recompute the format above and compare to `agents(addr).strategyHash` on the
+> round contract.
 
 ---
 

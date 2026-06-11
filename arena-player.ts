@@ -71,6 +71,12 @@ import {
   dispatchBid,
   settleDueAuctions,
 } from "./src/module-market.ts";
+import { renderHud, type HudState } from "./src/hud.ts";
+import {
+  publishStrategyCard,
+  startHeartbeat,
+  type LinkStatus,
+} from "./src/indexer-link.ts";
 
 // ─── Pretty logging ─────────────────────────────────────────────────
 const C = {
@@ -78,7 +84,20 @@ const C = {
   red: "\x1b[31m", green: "\x1b[32m", yellow: "\x1b[33m", cyan: "\x1b[36m",
 };
 const ts = () => new Date().toLocaleTimeString("en-US", { hour12: false });
-const log = (msg: string) => process.stdout.write(`${C.dim}${ts()}${C.reset} ${msg}\n`);
+/// While the HUD owns the screen (hudActive), log lines feed its tail panel
+/// instead of stdout — the boot/join phase always prints normally so approval
+/// txs and errors are never hidden.
+let hudActive = false;
+const logRing: string[] = [];
+const log = (msg: string) => {
+  const line = `${C.dim}${ts()}${C.reset} ${msg}`;
+  if (hudActive) {
+    logRing.push(line);
+    if (logRing.length > 8) logRing.shift();
+  } else {
+    process.stdout.write(`${line}\n`);
+  }
+};
 function fatal(msg: string): never {
   process.stderr.write(`${C.red}ERROR: ${msg}${C.reset}\n`);
   process.exit(1);
@@ -104,6 +123,12 @@ const PROMPT_PATH = flag("prompt", process.env.PROMPT_PATH ?? "");
 const CAP_USD = Number(flag("cap-usd", process.env.CAP_USD ?? "5"));
 const SKIP_JOIN = has("no-join");
 const DRY_RUN = has("dry-run");
+// v0.4.0 — optional indexer link (strategy-card publish + 60s heartbeat for
+// the Online indicator on neoarch.xyz). Gameplay never depends on it.
+const INDEXER_URL = flag("indexer", process.env.INDEXER_URL ?? "").replace(/\/$/, "");
+// v0.4.0 — live ASCII HUD. On by default in a TTY; --no-hud (or piping
+// stdout) falls back to plain log lines.
+const HUD_ENABLED = !has("no-hud") && Boolean(process.stdout.isTTY);
 
 if (!AGENT_PK || !AGENT_PK.startsWith("0x") || AGENT_PK.length !== 66) {
   fatal("set AGENT_PK=0x<64-hex-chars> in env (your wallet private key — never sent anywhere)");
@@ -143,11 +168,13 @@ const llm: LlmClient | null =
     : null;
 
 // ─── Banner ─────────────────────────────────────────────────────────
-log(`${C.cyan}NeoArch Arena Player${C.reset} v0.3.0`);
+log(`${C.cyan}NeoArch Arena Player${C.reset} v0.4.0`);
 log(`  agent:    ${C.bold}${account.address}${C.reset}`);
 log(`  round:    ${ROUND_ADDRESS}`);
 log(`  rpc:      ${RPC}`);
 log(`  brain:    ${llm ? `${C.green}LLM${C.reset} (${LLM_PROVIDER}, cap=$${CAP_USD}/round)` : `heuristic ${C.bold}${STRATEGY}${C.reset}`}`);
+log(`  indexer:  ${INDEXER_URL ? INDEXER_URL : `${C.dim}off (set INDEXER_URL for the Online badge + strategy card)${C.reset}`}`);
+log(`  hud:      ${HUD_ENABLED ? "on (--no-hud for plain logs)" : `${C.dim}off${C.reset}`}`);
 if (DRY_RUN) log(`  mode:     ${C.yellow}DRY-RUN${C.reset} (no transactions sent)`);
 
 // ─── State machine ──────────────────────────────────────────────────
@@ -158,6 +185,108 @@ interface PendingReveal {
 }
 let pending: PendingReveal | null = null;
 let lastSeenTick = -1n;
+
+// ─── HUD state (v0.4.0) ─────────────────────────────────────────────
+const PHASES: Record<number, { name: string; payloadMod: number }> = {
+  0: { name: "EXPANSION", payloadMod: 1.25 },
+  1: { name: "LOAD SHOCK", payloadMod: 0.7 },
+  2: { name: "FREEZE", payloadMod: 0.6 },
+  3: { name: "CONGESTION", payloadMod: 0.85 },
+};
+let lastSnapshot: AgentSnapshot | null = null;
+let lastActionSummary: string | null = null;
+let lastRevealedTick: number | null = null;
+let indexerLink: LinkStatus = INDEXER_URL ? "error" : "off";
+let lastHudRenderMs = 0;
+
+/// Round-context reads for the HUD frame. Each is best-effort — a failed read
+/// renders as "—" rather than breaking the loop. Throttled by maybeRenderHud.
+async function readHudExtras() {
+  const [phaseIdx, ticksRemaining, alive, total, vault] = await Promise.all([
+    publicClient.readContract({ address: ROUND_ADDRESS, abi: atrRoundAbi, functionName: "currentRegimePhaseIdx" }).catch(() => null),
+    publicClient.readContract({ address: ROUND_ADDRESS, abi: atrRoundAbi, functionName: "regimePhaseTicksRemaining" }).catch(() => null),
+    publicClient.readContract({ address: ROUND_ADDRESS, abi: atrRoundAbi, functionName: "aliveCount" }).catch(() => null),
+    publicClient.readContract({ address: ROUND_ADDRESS, abi: atrRoundAbi, functionName: "totalAgents" }).catch(() => null),
+    publicClient.readContract({ address: ROUND_ADDRESS, abi: atrRoundAbi, functionName: "prizeVault" }).catch(() => null),
+  ]);
+  let phase: HudState["phase"] = null;
+  if (phaseIdx !== null) {
+    const order = (await publicClient
+      .readContract({ address: ROUND_ADDRESS, abi: atrRoundAbi, functionName: "regimePhaseOrder", args: [BigInt(phaseIdx as number)] })
+      .catch(() => null)) as number | null;
+    if (order !== null && PHASES[order]) {
+      phase = { ...PHASES[order], ticksRemaining: ticksRemaining !== null ? Number(ticksRemaining) : 0 };
+    }
+  }
+  return {
+    phase,
+    aliveCount: alive !== null ? Number(alive) : null,
+    totalAgents: total !== null ? Number(total) : null,
+    prizeVaultCredits: (vault as bigint | null),
+  };
+}
+
+/// Paint a HUD frame — at most every 5s unless forced (post-commit/reveal).
+async function maybeRenderHud(
+  timing: { status: number; tick: bigint; lastTs: bigint },
+  force = false,
+): Promise<void> {
+  if (!HUD_ENABLED) return;
+  const nowMs = Date.now();
+  if (!force && nowMs - lastHudRenderMs < 5_000) return;
+  lastHudRenderMs = nowMs;
+  hudActive = true;
+
+  const [extras, snap] = await Promise.all([
+    readHudExtras(),
+    readSnapshot().catch(() => lastSnapshot),
+  ]);
+  if (snap) lastSnapshot = snap;
+
+  const now = Math.floor(nowMs / 1000);
+  const tickStart = Number(timing.lastTs);
+  const commitDeadline = tickStart + commitWindowSec;
+  const tickEnd = tickStart + tickDurationSec;
+  let window: HudState["window"] = "closed";
+  let windowSecsLeft = 0;
+  if (timing.status === ROUND_STATUS.ACTIVE) {
+    if (now < commitDeadline) {
+      window = "commit";
+      windowSecsLeft = commitDeadline - now;
+    } else if (now < tickEnd) {
+      window = "reveal";
+      windowSecsLeft = tickEnd - now;
+    }
+  }
+
+  const spend = llm ? llm.getSpend() : null;
+  process.stdout.write(
+    renderHud({
+      address: account.address,
+      roundAddress: ROUND_ADDRESS,
+      status: timing.status,
+      tick: Number(timing.tick),
+      endTick: endTickNum,
+      phase: extras.phase,
+      aliveCount: extras.aliveCount,
+      totalAgents: extras.totalAgents,
+      prizeVaultCredits: extras.prizeVaultCredits,
+      agent: lastSnapshot,
+      window,
+      windowSecsLeft,
+      pendingTick: pending?.tick ?? null,
+      lastRevealedTick,
+      lastAction: lastActionSummary,
+      brain: llm
+        ? `LLM ${LLM_PROVIDER}${LLM_MODEL ? ` (${LLM_MODEL})` : ""}`
+        : `heuristic ${STRATEGY}`,
+      spendLine: spend ? formatSpend(spend) : null,
+      indexerLink,
+      dryRun: DRY_RUN,
+      logTail: logRing,
+    }),
+  );
+}
 
 // ─── Strategy commitment ────────────────────────────────────────────
 /// Compute the strategyHash committed at joinRound. Hashes the canonical
@@ -348,6 +477,14 @@ async function decideAndCommit(execTick: bigint): Promise<void> {
   const salt = generateSalt();
   const commitment = computeCommitment(action, salt);
 
+  // HUD: human-readable allocation split for the "last" line.
+  const budget = snap.throughputAllowance > 0n ? snap.throughputAllowance : 1n;
+  const pct = (v: bigint) => Number((v * 100n) / budget);
+  lastSnapshot = snap;
+  lastActionSummary =
+    `payload ${pct(action.ePayloadProd)}% · alpha ${pct(action.eAlphaProd)}% · craft ${pct(action.eCraft)}%` +
+    (action.swaps.length > 0 ? ` · ${action.swaps.length} swap(s)` : "");
+
   log(
     `${C.cyan}COMMIT${C.reset} t=${execTick}  ` +
       `payload=${fmtUsd(action.ePayloadProd)}  ` +
@@ -414,9 +551,13 @@ async function maybeReveal(execTick: bigint): Promise<void> {
   pending = null;
 
   log(`${C.cyan}REVEAL${C.reset} t=${p.tick}`);
-  if (DRY_RUN) return;
+  if (DRY_RUN) {
+    lastRevealedTick = p.tick;
+    return;
+  }
   try {
     const hash = await submitReveal(walletClient, ROUND_ADDRESS, p.action, p.salt);
+    lastRevealedTick = p.tick;
     log(`  reveal tx: ${C.dim}${hash}${C.reset}`);
   } catch (e: any) {
     log(`${C.red}reveal revert: ${e.shortMessage ?? e.message ?? e}${C.reset}`);
@@ -474,12 +615,15 @@ async function pollLoop(): Promise<void> {
   while (true) {
     try {
       const { status, tick, lastTs } = await readTiming();
+      await maybeRenderHud({ status, tick, lastTs });
 
       if (status === ROUND_STATUS.RESOLVED) {
+        hudActive = false; // resolution summary prints below the last frame
         await handleResolved();
         return;
       }
       if (status === ROUND_STATUS.CANCELLED) {
+        hudActive = false;
         log(`${C.yellow}round CANCELLED${C.reset} — the contract auto-refunded your entry (9.5 USDC). exiting.`);
         return;
       }
@@ -529,6 +673,7 @@ async function pollLoop(): Promise<void> {
       // Commit window — submit if we haven't yet for this execTick.
       if (now < commitDeadline && (!pending || pending.tick !== Number(execTick))) {
         await decideAndCommit(execTick);
+        await maybeRenderHud({ status, tick, lastTs }, true);
         await sleep(2_000);
         continue;
       }
@@ -536,6 +681,7 @@ async function pollLoop(): Promise<void> {
       // Reveal window — submit at +200s to leave a 100s safety margin.
       if (now >= commitDeadline && now < tickEnd && pending?.tick === Number(execTick)) {
         await maybeReveal(execTick);
+        await maybeRenderHud({ status, tick, lastTs }, true);
         await sleep(2_000);
         continue;
       }
@@ -552,11 +698,91 @@ async function pollLoop(): Promise<void> {
   }
 }
 
+// ─── Indexer link (optional, v0.4.0) ────────────────────────────────
+/// Card text shown on the agent's neoarch.xyz profile. For LLM mode this is
+/// the operator prompt plus a provenance footer; for heuristic mode it's a
+/// generated description (the indexer requires ≥200 chars). The strategyHash
+/// we publish is the SAME hash committed at joinRound — the web page can't
+/// know the CLI's local config, so the CLI is the source of truth.
+function buildCardPrompt(): string {
+  if (llm) {
+    const provider = LLM_PROVIDER || "anthropic";
+    const model = LLM_MODEL || "default";
+    return (
+      `${userStrategyPrompt.trim()}\n\n` +
+      `[Published by neoarch-cli v0.4.0 (Path A, self-hosted). The on-chain ` +
+      `strategyHash committed at joinRound binds ` +
+      `keccak256("llm|${provider}|${model}|<prompt above>") — provider, model, ` +
+      `and prompt are locked for the entire round. This card was auto-published ` +
+      `by the CLI at join and matches the chain commitment exactly.]`
+    );
+  }
+  return (
+    `Heuristic preset "${STRATEGY}" — deterministic local strategy from the ` +
+    `open-source neoarch-cli (no LLM). Each tick it splits the throughput ` +
+    `allowance between payload production, alpha, and module crafting per the ` +
+    `preset's fixed weights, with survival overrides under starvation pressure. ` +
+    `The on-chain strategyHash committed at joinRound binds ` +
+    `keccak256("heuristic|${STRATEGY}|v1") and is locked for the entire round. ` +
+    `Auto-published by the CLI at join.`
+  );
+}
+
+async function linkIndexer(): Promise<void> {
+  if (!INDEXER_URL) return;
+  // Guard: if we're ALREADY joined with a DIFFERENT hash, the join came from
+  // the web flow (the Join button commits the web-saved card's hash). In that
+  // case the existing card matches the chain and replacing it with ours would
+  // break card↔chain verification — keep it, heartbeat only.
+  try {
+    const onChain = (await publicClient.readContract({
+      address: ROUND_ADDRESS,
+      abi: atrRoundAbi,
+      functionName: "agents",
+      args: [account.address],
+    })) as readonly unknown[];
+    const committed = String(onChain[11] ?? "").toLowerCase();
+    const ZERO32 = `0x${"0".repeat(64)}`;
+    if (committed && committed !== ZERO32 && committed !== computeStrategyHash().toLowerCase()) {
+      log(
+        `${C.yellow}on-chain strategyHash differs from this CLI config${C.reset} ` +
+          `(joined via the web flow?) — keeping the existing profile card; heartbeat only`,
+      );
+      startHeartbeat(INDEXER_URL, account, (s, detail) => {
+        indexerLink = s;
+        if (s === "ok") log(`${C.green}heartbeat ok${C.reset} — you'll show Online on neoarch.xyz`);
+        else log(`${C.yellow}heartbeat failing${C.reset} (${detail ?? "?"}) — Online badge will lapse; gameplay unaffected`);
+      });
+      return;
+    }
+  } catch {
+    // Chain read failed — proceed; a wrong card is recoverable, a missed
+    // publish for a CLI-join is the more common case.
+  }
+  const res = await publishStrategyCard(INDEXER_URL, account, {
+    prompt: buildCardPrompt(),
+    llmProvider: (llm ? (LLM_PROVIDER as Provider) : "compatible") as "anthropic" | "openai" | "compatible",
+    strategyHash: computeStrategyHash(),
+    hardCapUsd: llm ? CAP_USD : 1,
+  });
+  if (res.ok) {
+    log(`${C.green}strategy card published${C.reset} → ${INDEXER_URL} (hash matches on-chain commitment)`);
+  } else {
+    log(`${C.yellow}strategy-card publish failed${C.reset} (${res.error}) — profile card may be stale; gameplay unaffected`);
+  }
+  startHeartbeat(INDEXER_URL, account, (s, detail) => {
+    indexerLink = s;
+    if (s === "ok") log(`${C.green}heartbeat ok${C.reset} — you'll show Online on neoarch.xyz`);
+    else log(`${C.yellow}heartbeat failing${C.reset} (${detail ?? "?"}) — Online badge will lapse; gameplay unaffected`);
+  });
+}
+
 // ─── Boot ───────────────────────────────────────────────────────────
 (async () => {
   try {
     await ensureJoined();
     await loadRoundTiming();
+    await linkIndexer();
     await pollLoop();
     log(`${C.dim}exit.${C.reset}`);
   } catch (e: any) {

@@ -120,6 +120,37 @@ export const atrRoundAbi = [
     inputs: [],
     outputs: [{ name: "", type: "uint256" }],
   },
+  // ── v0.4.0 HUD reads (all on ATRRound) ──
+  {
+    type: "function",
+    name: "currentRegimePhaseIdx",
+    stateMutability: "view",
+    inputs: [],
+    // Indexes the per-round SHUFFLED regimePhaseOrder[] — idx 0 is NOT
+    // necessarily Expansion; resolve via regimePhaseOrder(idx).
+    outputs: [{ name: "", type: "uint8" }],
+  },
+  {
+    type: "function",
+    name: "aliveCount",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+  {
+    type: "function",
+    name: "totalAgents",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+  {
+    type: "function",
+    name: "prizeVault",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ name: "", type: "uint256" }],
+  },
   {
     type: "function",
     name: "roundStatus",
