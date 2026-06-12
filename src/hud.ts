@@ -29,6 +29,8 @@ export interface HudState {
   agent: HudAgent | null;
   window: "commit" | "reveal" | "closed";
   windowSecsLeft: number;
+  windowTotalSecs: number; // full duration of the current window (bar scale)
+  agentStale: boolean; // latest snapshot read failed — vitals may be outdated
   pendingTick: number | null; // commit submitted, reveal outstanding
   lastRevealedTick: number | null;
   lastAction: string | null; // "payload 60% · alpha 25% · craft 15%"
@@ -69,8 +71,15 @@ const fmt6 = (v: bigint) => (Number(v) / 1e6).toFixed(2);
 const visible = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "");
 
 function padLine(content: string): string {
-  const pad = Math.max(0, W - visible(content).length);
-  return `║ ${content}${" ".repeat(pad)} ║`;
+  let c = content;
+  // Overlong lines would push the right border past the frame. Truncating a
+  // COLORED string risks splitting an ANSI sequence, so strip codes first and
+  // render the truncated line dim — losing color on overflow beats corruption.
+  if (visible(c).length > W) {
+    c = `${DIM}${visible(c).slice(0, W - 1)}…${R}`;
+  }
+  const pad = Math.max(0, W - visible(c).length);
+  return `║ ${c}${" ".repeat(pad)} ║`;
 }
 
 function bar(ratio: number, width: number): string {
@@ -92,7 +101,8 @@ export function renderHud(s: HudState): string {
   // ── header ──
   const tickStr = s.endTick > 0 ? `tick ${s.tick}/${s.endTick}` : `tick ${s.tick}`;
   const title = ` NEOARCH ARENA ${DIM}${s.roundAddress.slice(0, 8)}…${R} ${statusColor}${statusName}${R}`;
-  const headPad = Math.max(0, W - visible(title).length - visible(tickStr).length - 1);
+  // Row layout: ║ + title + pad + tick + " ║" must total W+4 like padLine rows.
+  const headPad = Math.max(1, W + 1 - visible(title).length - visible(tickStr).length);
   lines.push(`╔${"═".repeat(W + 2)}╗`);
   lines.push(`║${title}${" ".repeat(headPad)}${tickStr} ║`);
 
@@ -114,7 +124,7 @@ export function renderHud(s: HudState): string {
     lines.push(
       padLine(
         `window ${winColor}${winLabel}${R} ${bar(
-          s.windowSecsLeft / Math.max(s.windowSecsLeft, 60),
+          s.windowSecsLeft / Math.max(1, s.windowTotalSecs),
           18,
         )} ${String(s.windowSecsLeft).padStart(3)}s left`,
       ),
@@ -128,11 +138,12 @@ export function renderHud(s: HudState): string {
     const a = s.agent;
     const lifeTicks = Number(a.payload / PAYLOAD_CONSUMPTION);
     const aliveBadge = a.alive ? `${GREEN}ALIVE${R}` : `${RED}ELIMINATED${R}`;
+    const staleBadge = s.agentStale ? ` ${YELLOW}(stale — rpc read failing)${R}` : "";
     const missBadge =
       a.missCount > 0 ? `  ${RED}miss ${a.missCount}/12 (starving)${R}` : "";
     lines.push(
       padLine(
-        `${BOLD}YOU${R} ${DIM}${s.address.slice(0, 6)}…${s.address.slice(-4)}${R}  ${aliveBadge}  tier ${a.moduleTier}${
+        `${BOLD}YOU${R} ${DIM}${s.address.slice(0, 6)}…${s.address.slice(-4)}${R}  ${aliveBadge}${staleBadge}  tier ${a.moduleTier}${
           a.moduleTier > 0 ? ` ${DIM}dur ${fmt6(a.moduleDurability)}${R}` : ""
         }${missBadge}`,
       ),
@@ -178,9 +189,11 @@ export function renderHud(s: HudState): string {
   if (s.logTail.length > 0) {
     lines.push(divider());
     for (const l of s.logTail.slice(-5)) {
-      const trimmed =
-        visible(l).length > W ? l.slice(0, Math.max(0, l.length - (visible(l).length - W + 1))) + "…" : l;
-      lines.push(padLine(`${DIM}${visible(trimmed)}${R}`));
+      // Strip ANSI BEFORE truncating — slicing a colored string can split an
+      // escape sequence and leak raw CSI bytes into the terminal.
+      const vis = visible(l);
+      const trimmed = vis.length > W ? vis.slice(0, W - 1) + "…" : vis;
+      lines.push(padLine(`${DIM}${trimmed}${R}`));
     }
   }
 

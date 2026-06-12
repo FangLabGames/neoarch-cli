@@ -237,11 +237,15 @@ async function maybeRenderHud(
   lastHudRenderMs = nowMs;
   hudActive = true;
 
+  let agentStale = false;
   const [extras, snap] = await Promise.all([
     readHudExtras(),
-    readSnapshot().catch(() => lastSnapshot),
+    readSnapshot().catch(() => {
+      agentStale = true; // render the last snapshot but badge it as stale
+      return lastSnapshot;
+    }),
   ]);
-  if (snap) lastSnapshot = snap;
+  if (snap && !agentStale) lastSnapshot = snap;
 
   const now = Math.floor(nowMs / 1000);
   const tickStart = Number(timing.lastTs);
@@ -249,13 +253,16 @@ async function maybeRenderHud(
   const tickEnd = tickStart + tickDurationSec;
   let window: HudState["window"] = "closed";
   let windowSecsLeft = 0;
+  let windowTotalSecs = 0;
   if (timing.status === ROUND_STATUS.ACTIVE) {
     if (now < commitDeadline) {
       window = "commit";
       windowSecsLeft = commitDeadline - now;
+      windowTotalSecs = commitWindowSec;
     } else if (now < tickEnd) {
       window = "reveal";
       windowSecsLeft = tickEnd - now;
+      windowTotalSecs = tickDurationSec - commitWindowSec;
     }
   }
 
@@ -274,6 +281,8 @@ async function maybeRenderHud(
       agent: lastSnapshot,
       window,
       windowSecsLeft,
+      windowTotalSecs,
+      agentStale,
       pendingTick: pending?.tick ?? null,
       lastRevealedTick,
       lastAction: lastActionSummary,
@@ -439,7 +448,10 @@ async function ensureJoined(): Promise<void> {
 async function decideAndCommit(execTick: bigint): Promise<void> {
   const snap = await readSnapshot();
   if (!snap.alive || snap.missCount >= STARVATION_STEPS) {
-    log(`${C.red}agent eliminated${C.reset} — exiting`);
+    // Bypass the HUD log ring — this is the last thing the process says and
+    // a ring entry would die with it, leaving a silent exit under the HUD.
+    hudActive = false;
+    process.stdout.write(`\n${C.red}agent eliminated${C.reset} — exiting\n`);
     process.exit(0);
   }
 
@@ -791,6 +803,10 @@ async function linkIndexer(): Promise<void> {
 })();
 
 process.on("SIGINT", () => {
-  log(`\n${C.dim}interrupted — exiting cleanly. Pending reveals (if any) are dropped.${C.reset}`);
+  // Direct write — the HUD log ring would swallow this final message.
+  hudActive = false;
+  process.stdout.write(
+    `\n${C.dim}interrupted — exiting cleanly. Pending reveals (if any) are dropped.${C.reset}\n`,
+  );
   process.exit(0);
 });

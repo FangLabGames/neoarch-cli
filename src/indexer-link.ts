@@ -24,13 +24,22 @@ interface Signer {
 
 export type LinkStatus = "off" | "ok" | "error";
 
+// Strictly-monotonic nonce even when two posts land in the same millisecond
+// (e.g. the card publish resolving instantly on localhost, then the first
+// heartbeat) — the indexer rejects nonce <= last seen.
+let lastNonce = 0;
+function nextNonce(): number {
+  lastNonce = Math.max(Date.now(), lastNonce + 1);
+  return lastNonce;
+}
+
 async function signedPost(
   indexerUrl: string,
   signer: Signer,
   path: string,
   body: Record<string, unknown>,
 ): Promise<{ ok: boolean; status: number; error?: string }> {
-  const message = JSON.stringify({ ...body, nonce: Date.now() });
+  const message = JSON.stringify({ ...body, nonce: nextNonce() });
   const signature = await signer.signMessage({ message });
   try {
     const res = await fetch(`${indexerUrl}${path}`, {
