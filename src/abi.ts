@@ -120,6 +120,29 @@ export const atrRoundAbi = [
     inputs: [],
     outputs: [{ name: "", type: "uint256" }],
   },
+  // ── v0.5.0 prediction reads (all on ATRRound) ──
+  {
+    type: "function",
+    name: "market",
+    stateMutability: "view",
+    inputs: [],
+    // ATRMarket clone for this round (zero = no prediction market).
+    outputs: [{ name: "", type: "address" }],
+  },
+  {
+    type: "function",
+    name: "roundId",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+  {
+    type: "function",
+    name: "getAliveAgents",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ name: "", type: "address[]" }],
+  },
   // ── v0.4.0 HUD reads (all on ATRRound) ──
   {
     type: "function",
