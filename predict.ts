@@ -46,6 +46,7 @@ import {
   signUsdcPermit,
   type MarketView,
 } from "./src/prediction.ts";
+import { loadPrivateKey } from "./src/keystore.ts";
 
 // ── args/env ─────────────────────────────────────────────────
 const argv = process.argv.slice(2);
@@ -56,7 +57,6 @@ const flag = (name: string, def = ""): string => {
 const has = (name: string): boolean => argv.includes(`--${name}`);
 
 const CMD = argv[0] && !argv[0].startsWith("--") ? argv[0] : "list";
-const PK = (process.env.BETTOR_PK ?? process.env.AGENT_PK ?? "") as Hex;
 const ROUND_ADDRESS = (process.env.ROUND_ADDRESS ?? flag("round")) as Address;
 const RPC = flag("rpc", process.env.RPC ?? "https://rpc.testnet.arc.network");
 const INDEXER_URL = (process.env.INDEXER_URL ?? "").replace(/\/$/, "");
@@ -68,8 +68,17 @@ const fmt = (v: bigint) => (Number(v) / 1e6).toFixed(2);
 const short = (a: string) => `${a.slice(0, 6)}…${a.slice(-4)}`;
 const fatal = (m: string): never => { console.error(`${C.red}✗ ${m}${C.reset}`); process.exit(1); };
 
-if (!PK || !/^0x[a-fA-F0-9]{64}$/.test(PK)) fatal("set BETTOR_PK (or AGENT_PK) — the wallet placing/claiming bets");
 if (!ROUND_ADDRESS || ROUND_ADDRESS.length !== 42) fatal("set ROUND_ADDRESS or pass --round 0x…");
+
+// v0.6.0 — Foundry-keystore key loading (--account <name> reads the same
+// encrypted files `cast --account` uses; raw BETTOR_PK/AGENT_PK env = legacy).
+const { pk: PK } = await loadPrivateKey({
+  account: flag("account", process.env.ACCOUNT ?? ""),
+  keystorePath: flag("keystore", process.env.KEYSTORE ?? ""),
+  passwordFile: flag("password-file", process.env.KEYSTORE_PASSWORD_FILE ?? ""),
+  envPk: process.env.BETTOR_PK ?? process.env.AGENT_PK,
+  envPkName: "BETTOR_PK",
+}).catch((e) => fatal(e?.message ?? String(e)));
 
 const account = privateKeyToAccount(PK);
 const publicClient = createPublicClient({ chain: arcTestnet, transport: http(RPC) });

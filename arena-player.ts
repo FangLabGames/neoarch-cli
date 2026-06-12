@@ -78,6 +78,7 @@ import {
   type LinkStatus,
 } from "./src/indexer-link.ts";
 import { ensureRegistered } from "./src/identity.ts";
+import { loadPrivateKey } from "./src/keystore.ts";
 
 // ─── Pretty logging ─────────────────────────────────────────────────
 const C = {
@@ -112,7 +113,15 @@ const flag = (name: string, def = ""): string => {
 };
 const has = (name: string): boolean => argv.includes(`--${name}`);
 
-const AGENT_PK = (process.env.AGENT_PK ?? "") as Hex;
+// v0.6.0 — Foundry-keystore key loading (--account <name> reads the same
+// encrypted files `cast --account` uses; raw AGENT_PK env stays as legacy).
+const { pk: AGENT_PK, source: KEY_SOURCE } = await loadPrivateKey({
+  account: flag("account", process.env.ACCOUNT ?? ""),
+  keystorePath: flag("keystore", process.env.KEYSTORE ?? ""),
+  passwordFile: flag("password-file", process.env.KEYSTORE_PASSWORD_FILE ?? ""),
+  envPk: process.env.AGENT_PK,
+  envPkName: "AGENT_PK",
+}).catch((e) => fatal(e?.message ?? String(e)));
 const ROUND_ADDRESS = (process.env.ROUND_ADDRESS ?? flag("round")) as Address;
 const RPC = flag("rpc", process.env.RPC ?? "https://rpc.testnet.arc.network");
 const STRATEGY = flag("strategy", "balanced") as Strategy;
@@ -136,9 +145,6 @@ const HUD_ENABLED = !has("no-hud") && Boolean(process.stdout.isTTY);
 // isn't derived yet at flag-parse time).
 const AGENT_NAME_FLAG = flag("name", process.env.AGENT_NAME ?? "").slice(0, 32);
 
-if (!AGENT_PK || !AGENT_PK.startsWith("0x") || AGENT_PK.length !== 66) {
-  fatal("set AGENT_PK=0x<64-hex-chars> in env (your wallet private key — never sent anywhere)");
-}
 if (!ROUND_ADDRESS || !ROUND_ADDRESS.startsWith("0x") || ROUND_ADDRESS.length !== 42) {
   fatal("set ROUND_ADDRESS=0x<40-hex-chars> in env or pass --round 0x... (find on neoarch.xyz/arena)");
 }
@@ -176,6 +182,7 @@ const llm: LlmClient | null =
 // ─── Banner ─────────────────────────────────────────────────────────
 log(`${C.cyan}NeoArch Arena Player${C.reset} v0.4.0`);
 log(`  agent:    ${C.bold}${account.address}${C.reset}`);
+log(`  key:      ${KEY_SOURCE}`);
 log(`  round:    ${ROUND_ADDRESS}`);
 log(`  rpc:      ${RPC}`);
 log(`  brain:    ${llm ? `${C.green}LLM${C.reset} (${LLM_PROVIDER}, cap=$${CAP_USD}/round)` : `heuristic ${C.bold}${STRATEGY}${C.reset}`}`);

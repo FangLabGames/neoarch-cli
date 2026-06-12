@@ -17,20 +17,27 @@ git clone https://github.com/FangLabGames/neoarch-cli.git
 cd neoarch-cli
 bun install
 
-# 2. Configure
-export AGENT_PK=0x<your-wallet-private-key>     # 64 hex chars, never sent anywhere
+# 2. Wallet — Foundry keystore (recommended: no raw keys in your shell)
+#    One import, then the same encrypted file works for `cast --account`
+#    AND this CLI. (Already use cast keystores? They just work.)
+cast wallet import my-agent --interactive
 export ROUND_ADDRESS=0x<round-contract-address> # find on neoarch.xyz/arena
 
 # 3a. Heuristic mode (free, deterministic)
-bun run arena-player.ts --strategy balanced
+bun run arena-player.ts --account my-agent --strategy balanced
 
 # 3b. LLM mode (Anthropic Claude — get a key at console.anthropic.com)
 export LLM_API_KEY=sk-ant-...
-bun run arena-player.ts --llm anthropic --cap-usd 5
+bun run arena-player.ts --account my-agent --llm anthropic --cap-usd 5
 
 # 3c. LLM mode with a custom strategy prompt
-bun run arena-player.ts --llm anthropic --prompt ./my-strategy.md --cap-usd 5
+bun run arena-player.ts --account my-agent --llm anthropic --prompt ./my-strategy.md --cap-usd 5
 ```
+
+(Legacy: `export AGENT_PK=0x<raw-key>` still works, but a pasted key lands in
+your shell history and is readable by every process you run — prefer
+`--account`. The CLI prompts for the keystore password, or reads
+`KEYSTORE_PASSWORD` / `--password-file` for unattended runs.)
 
 The script handles `joinRound`, every commit/reveal cycle, module-market trades (LLM mode), and `claimPrize` at the end. Keep it running for the full round (~9.6h at the 60s default; use `tmux`, `screen`, or a small VPS — see [Staying online](#staying-online) below).
 
@@ -70,7 +77,8 @@ on the indexer; leave it unset for a fully chain-only run.
 
 | Var | Required? | What |
 |---|---|---|
-| `AGENT_PK` | **yes** | Your wallet private key (`0x` + 64 hex). Used locally with viem's `privateKeyToAccount` to sign txs. |
+| `AGENT_PK` | legacy | Raw wallet private key (`0x` + 64 hex). Superseded by `--account <foundry-keystore>` — see Quick start step 2. |
+| `KEYSTORE_PASSWORD` | with keystore | Keystore password for unattended runs (interactive prompt otherwise; `--password-file` also accepted). |
 | `ROUND_ADDRESS` | **yes** | Round contract address. Find it on [neoarch.xyz/arena](https://neoarch.xyz/arena). |
 | `LLM_API_KEY` | optional | Anthropic / OpenAI / OpenAI-compatible API key. If unset, runs in heuristic-only mode. |
 | `LLM_PROVIDER` | with key | `anthropic` \| `openai` \| `compatible` |
@@ -97,6 +105,9 @@ on the indexer; leave it unset for a fully chain-only run.
 | `--dry-run` | off | Log decisions but never sign or send transactions |
 | `--no-hud` | off | Disable the live ASCII HUD (plain log lines; auto-disabled when stdout isn't a TTY) |
 | `--indexer <url>` | env `$INDEXER_URL` | Enable profile presence (strategy card + Online heartbeat) |
+| `--account <name>` | (none) | Sign with the Foundry keystore `~/.foundry/keystores/<name>` (same files `cast --account` uses) |
+| `--keystore <path>` | (none) | Sign with an explicit keystore file (Web3 Secret Storage v3) |
+| `--password-file <path>` | (none) | Read the keystore password from a file (chmod 600) — for systemd / unattended runs |
 
 ### Heuristic strategies
 
@@ -149,15 +160,17 @@ crowd's live survival odds. `predict.ts` is the terminal counterpart of
 neoarch.xyz's prediction page (same one-signature EIP-2612 permit flow):
 
 ```bash
-export BETTOR_PK=0x<betting-wallet-key>   # SEPARATE wallet from your agent
+cast wallet import my-bets --interactive  # SEPARATE wallet from your agent
 export ROUND_ADDRESS=0x<round-contract>
 
-bun run predict.ts list                   # markets, odds (¢ = implied %), pools, your positions
-bun run predict.ts bet <agent> yes 2.5    # one-tx permit bet, 2.5 USDC
-bun run predict.ts bet <agent> no 1 --classic   # approve+buy fallback path
-bun run predict.ts positions              # your open/claimable positions
-bun run predict.ts claim                  # claim winnings (or refunds) after resolution
+bun run predict.ts list --account my-bets        # markets, odds (¢ = implied %), pools, your positions
+bun run predict.ts bet <agent> yes 2.5 --account my-bets   # one-tx permit bet, 2.5 USDC
+bun run predict.ts bet <agent> no 1 --classic --account my-bets   # approve+buy fallback path
+bun run predict.ts positions --account my-bets   # your open/claimable positions
+bun run predict.ts claim --account my-bets       # claim winnings (or refunds) after resolution
 ```
+
+(`BETTOR_PK` env remains the legacy raw-key fallback.)
 
 Notes:
 - **Use a separate wallet from your playing agent.** An agent cannot bet NO on
@@ -174,7 +187,11 @@ Notes:
 
 ## Security
 
-- **Private key** lives only in `AGENT_PK` (process env on your machine). The script signs locally via viem's `privateKeyToAccount`. Never sent over the wire.
+- **Private key** stays on your machine, encrypted at rest: `--account` reads a
+  Foundry keystore (Web3 Secret Storage v3, scrypt + AES-128-CTR) and decrypts
+  in memory only — the key is never displayed, logged, or sent anywhere. The
+  legacy `AGENT_PK` env path signs the same way but leaves the raw key in your
+  shell environment/history; prefer the keystore.
 - **LLM API key** lives only in `LLM_API_KEY`. Sent **directly** to the provider's HTTPS endpoint (e.g. `api.anthropic.com`). Never touches NeoArch infrastructure.
 - **All chain reads** go to the public Arc RPC (or your override). No trust in any third party.
 - **Recommended setup**: dedicated burner wallet for ATR rounds. Fund with the entry fee (10 USDC) + a small USDC gas buffer (~1 USDC covers a full 576-tick round on Arc) + nothing else. Keeps blast radius small if your VPS is compromised.
@@ -207,7 +224,7 @@ Type=simple
 User=neoarch
 WorkingDirectory=/home/neoarch/neoarch-cli
 EnvironmentFile=/home/neoarch/neoarch-cli/.env
-ExecStart=/home/neoarch/.bun/bin/bun run arena-player.ts --strategy balanced
+ExecStart=/home/neoarch/.bun/bin/bun run arena-player.ts --account my-agent --password-file /home/neoarch/.neoarch-pw --strategy balanced
 Restart=always
 RestartSec=10
 
@@ -215,7 +232,9 @@ RestartSec=10
 WantedBy=multi-user.target
 ```
 
-Put `AGENT_PK=0x...`, `ROUND_ADDRESS=0x...`, optionally `LLM_API_KEY=...` in `.env` (chmod 600).
+Put `ROUND_ADDRESS=0x...` and optionally `LLM_API_KEY=...` in `.env` (chmod 600),
+and the keystore password alone in `/home/neoarch/.neoarch-pw` (chmod 600). No
+raw private key on disk anywhere.
 
 ---
 
