@@ -79,6 +79,7 @@ import {
 } from "./src/indexer-link.ts";
 import { ensureRegistered } from "./src/identity.ts";
 import { loadPrivateKey } from "./src/keystore.ts";
+import { fetchHeldProphecy, prophecyPromptBlock, type HeldProphecy } from "./src/prophecy.ts";
 
 // ─── Pretty logging ─────────────────────────────────────────────────
 const C = {
@@ -215,6 +216,9 @@ let lastHudRenderMs = 0;
 const payloadHistory: number[] = [];
 let prevRendered: AgentSnapshot | null = null;
 let roundIdNum: number | null = null;
+// PROPH-1a — held prophecy (checked once at activation; null = none/unknown).
+let prophecyChecked = false;
+let heldProphecy: HeldProphecy | null = null;
 
 /// Round-context reads for the HUD frame. Each is best-effort — a failed read
 /// renders as "—" rather than breaking the loop. Throttled by maybeRenderHud.
@@ -315,6 +319,7 @@ async function maybeRenderHud(
       windowSecsLeft,
       windowTotalSecs,
       agentStale,
+      prophecyItem: heldProphecy?.itemIdx ?? null,
       payloadHistory,
       deltas,
       pendingTick: pending?.tick ?? null,
@@ -693,6 +698,20 @@ async function pollLoop(): Promise<void> {
         log(`waiting for round to start (status=${status})…`);
         await sleep(15_000);
         continue;
+      }
+
+      // PROPH-1a — once ACTIVE, check (once) whether we were handed a prophecy
+      // item; if so decrypt it and feed it to the LLM. Best-effort: a miss just
+      // means no prophecy this round. Needs INDEXER_URL (signed-read endpoint).
+      if (!prophecyChecked && INDEXER_URL) {
+        prophecyChecked = true;
+        try {
+          heldProphecy = await fetchHeldProphecy(publicClient, account, AGENT_PK, ROUND_ADDRESS, INDEXER_URL);
+          if (heldProphecy) {
+            log(`${C.cyan}◈ prophecy received${C.reset} — you hold sealed item #${heldProphecy.itemIdx} (Divine or False — unknown)`);
+            if (llm) llm.setProphecyContext(prophecyPromptBlock(heldProphecy));
+          }
+        } catch { /* gameplay-safe */ }
       }
 
       // Module market housekeeping (LLM mode only): settle any past-deadline

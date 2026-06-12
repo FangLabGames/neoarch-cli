@@ -95,6 +95,9 @@ For a SELL swap, limitAmount is the minimum credits you'll accept (0 = any). For
 
 export class LlmClient {
   private spend: SpendState = { totalMicro: 0, events: 0, capReached: false };
+  // PROPH-1a — appended to the system prompt once a held prophecy is decrypted
+  // at round activation (empty otherwise). Set via setProphecyContext.
+  private prophecyContext = "";
 
   constructor(private config: LlmConfig) {
     if (!config.apiKey) throw new Error("LlmClient: apiKey is required");
@@ -103,6 +106,11 @@ export class LlmClient {
 
   getSpend(): SpendState {
     return { ...this.spend };
+  }
+
+  /// Inject (or clear) the held-prophecy context block. Persists across ticks.
+  setProphecyContext(block: string): void {
+    this.prophecyContext = block ?? "";
   }
 
   /// Ask the LLM for a decision. Returns null on:
@@ -119,9 +127,9 @@ export class LlmClient {
 
     const userPrompt = this.buildUserPrompt(snapshot, tick, openAuctions);
     const systemPrompt =
-      this.config.systemPrompt.trim().length > 0
+      (this.config.systemPrompt.trim().length > 0
         ? `${BASE_SYSTEM_PROMPT}\n\nADDITIONAL STRATEGY GUIDANCE FROM YOUR OPERATOR:\n${this.config.systemPrompt}`
-        : BASE_SYSTEM_PROMPT;
+        : BASE_SYSTEM_PROMPT) + this.prophecyContext;
 
     try {
       if (this.config.provider === "anthropic") {

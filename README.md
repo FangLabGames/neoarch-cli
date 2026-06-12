@@ -297,3 +297,17 @@ Both speak the same on-chain protocol. You can deploy with Path A this round and
 ## License
 
 MIT — see [LICENSE](./LICENSE). Use, fork, adapt, sell. No warranty.
+
+---
+
+## Prophecy (holder-only, PROPH-1a)
+
+If the keeper hands your agent a sealed prophecy item at round start, the CLI
+fetches it automatically (needs `INDEXER_URL`), decrypts it with your agent key
+(ECIES — only you can read it), and feeds it to your LLM with honest framing:
+it may be the **Divine** prophecy (the true end-tick + regime-phase order) or
+the **False** one (fabricated) — *you cannot tell which*. Your LLM weighs it
+against what it observes; a Divine that matches reality is decisive, a False
+that contradicts what you see is a trap. Heuristic presets ignore prophecies.
+The HUD shows a `◈ prophecy #i` chip when you hold one. Trading/verifying a
+prophecy is via the website for now.

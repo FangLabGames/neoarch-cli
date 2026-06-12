@@ -34,6 +34,7 @@ export interface HudState {
   prizeVaultCredits: bigint | null;
   agent: HudAgent | null;
   agentStale: boolean;
+  prophecyItem: number | null; // PROPH-1a — held sealed item idx, or null
   /// Recent payload samples (6dp ints as numbers) for the sparkline, oldest first.
   payloadHistory: number[];
   /// Per-render deltas vs the previous frame (null on the first frame).
@@ -196,9 +197,10 @@ export function renderHud(s: HudState): string {
       a.moduleTier > 0
         ? `${BR_CYAN}◆T${a.moduleTier}${R} ${DIM}dur ${fmt6(a.moduleDurability)}${R}`
         : `${DIM}◇T0${R}`;
+    const prophecyStr = s.prophecyItem !== null ? `  ${BR_MAGENTA}◈ prophecy #${s.prophecyItem}${R}` : "";
     lines.push(
       padLine(
-        `${BOLD}YOU${R} ${DIM}${s.address.slice(0, 6)}…${s.address.slice(-4)}${R}  ${aliveBadge}${staleBadge}  ${tierStr}${missBadge}`,
+        `${BOLD}YOU${R} ${DIM}${s.address.slice(0, 6)}…${s.address.slice(-4)}${R}  ${aliveBadge}${staleBadge}  ${tierStr}${missBadge}${prophecyStr}`,
       ),
     );
     const runwayColor = runwayTicks <= 3 ? RED : runwayTicks <= 8 ? BR_YELLOW : BR_GREEN;
