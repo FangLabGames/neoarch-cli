@@ -164,15 +164,18 @@ export function renderHud(s: HudState): string {
   const vaultStr = s.prizeVaultCredits !== null ? `${DIM}vault${R} ${fmt6(s.prizeVaultCredits)}` : "";
   lines.push(padLine(`${phaseStr}   ${aliveStr}   ${vaultStr}`));
 
-  // ── tick window ──
+  // ── tick window — the AGENT's autopilot phases (the player never acts
+  // per tick; their one commitment is the strategy locked at join) ──
   if (s.status === 2) {
     const winColor = s.window === "commit" ? BR_CYAN : s.window === "reveal" ? BR_YELLOW : DIM;
     const winIcon = s.window === "commit" ? "✎" : s.window === "reveal" ? "◉" : "·";
+    const winLabel =
+      s.window === "commit" ? "DECIDING " : s.window === "reveal" ? "REVEALING" : "IDLE     ";
     lines.push(
       padLine(
-        `${winColor}${winIcon} ${s.window.toUpperCase().padEnd(6)}${R} ${bar(
+        `${DIM}autopilot${R} ${winColor}${winIcon} ${winLabel}${R} ${bar(
           s.windowSecsLeft / Math.max(1, s.windowTotalSecs),
-          20,
+          18,
           winColor,
         )} ${String(s.windowSecsLeft).padStart(3)}s`,
       ),
@@ -218,10 +221,10 @@ export function renderHud(s: HudState): string {
 
   // ── action state ──
   const stateBits: string[] = [];
-  if (s.lastRevealedTick !== null) stateBits.push(`${BR_GREEN}✓ revealed t${s.lastRevealedTick}${R}`);
-  if (s.pendingTick !== null) stateBits.push(`${BR_CYAN}✎ committed t${s.pendingTick}${R} ${DIM}(awaiting reveal)${R}`);
+  if (s.lastRevealedTick !== null) stateBits.push(`${BR_GREEN}✓ played t${s.lastRevealedTick}${R}`);
+  if (s.pendingTick !== null) stateBits.push(`${BR_CYAN}✎ queued t${s.pendingTick}${R} ${DIM}(auto-reveals)${R}`);
   if (stateBits.length === 0) stateBits.push(`${DIM}no action in flight${R}`);
-  lines.push(padLine(`state   ${stateBits.join("  →  ")}`));
+  lines.push(padLine(`agent   ${stateBits.join("  →  ")}`));
   if (s.lastAction) lines.push(padLine(`last    ${CYAN}${s.lastAction}${R}`));
 
   lines.push(divider());

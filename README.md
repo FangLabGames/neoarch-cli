@@ -45,8 +45,8 @@ The script handles `joinRound`, every commit/reveal cycle, module-market trades 
 dashboard each tick: phase banner with phase-specific colour + icon (☀ ⚡ ❄ ≋),
 round/tick with a time-to-end estimate, your vitals (payload runway in ticks
 with a colour bar, a 24-sample payload sparkline, per-frame ▲/▼ deltas on
-payload/credits/alpha, module tier chip, starving warning), the commit/reveal
-window countdown bar, your last committed allocation, an LLM spend-vs-cap bar,
+payload/credits/alpha, module tier chip, starving warning), the autopilot
+deciding/revealing countdown bar, your agent's last played allocation, an LLM spend-vs-cap bar,
 indexer link ♥, and a colour-tinted tail of recent log lines. On by default in
 a TTY; `--no-hud` (or piping stdout) falls back to plain logs.
 
@@ -66,7 +66,15 @@ on the indexer; leave it unset for a fully chain-only run.
    overlay (two transactions, `--name <display-name>` optional) before joining.
    No web step — Path A never needs the website.
 2. **Joins the round** — calls `joinRound(strategyHash, hostingMode=0)` after approving the 10 USDC entry fee (skipped automatically if the round is free-entry / voucher-only). The `strategyHash` commits you to either your heuristic preset or your custom LLM prompt for the entire round. **SEC-SEED-1 (2026-06-10): joins freeze the moment the operator starts the round** — the round enters a short `SEEDING` status while the round seed is drawn (commit-reveal / VRF), then goes `ACTIVE` in the same tx the seed lands. Nobody — including the operator — can know the regime/phase schedule while registration is still open, so join timing carries no information edge.
-3. **Each tick** — reads your `AgentState` from chain, picks an allocation (LLM if a key is set; heuristic otherwise), commits in the commit window, reveals in the reveal window. Tick/window lengths are per-round (read `tickDuration()`/`commitWindow()` from chain; 60s/36s by default). Fully on-chain. No indexer, no NeoArch backend.
+3. **Each tick (autopilot — you never act per tick)** — your single commitment
+   is the strategy hash locked at join; from then on the AGENT plays by itself:
+   it reads your `AgentState` from chain, picks an allocation (LLM if a key is
+   set; heuristic otherwise), submits the hidden action in the protocol's
+   commit window and reveals it in the reveal window (this per-tick
+   commit-reveal is what stops rival agents copying your moves — it's the
+   agent's mechanic, not a player chore). Tick/window lengths are per-round
+   (read `tickDuration()`/`commitWindow()` from chain; 60s/36s by default).
+   Fully on-chain. No indexer, no NeoArch backend.
 4. **Module market (LLM mode)** — the in-round `ATRModuleMarket` English auction, settled entirely in **in-game credits** (no USDC moves mid-round). When you own a crafted module the LLM may **list** it (`workOrders`); when you own none, open auctions in your round are fed into the prompt and the LLM may **bid** (`moduleBids`) — the script bids the minimum the contract accepts (reserve, or high bid + 5%) up to the LLM's stated ceiling, and auto-settles any auction you sold or won once its deadline passes. Buying a tier 2-4 module for a few credits is usually far cheaper than crafting one from scratch.
 5. **Survival override** — if `missCount > 0` or your payload stockpile drops below ~2 (a 2-tick buffer), the script overrides your strategy and dumps 100% throughput into payload until you recover. You can disable this only by editing `src/strategy.ts`.
 6. **At round end** — when `roundStatus` returns `RESOLVED`, polls `pendingPayouts(your-wallet)` and calls `claimDeferredPayout()` if non-zero (covers both regular survivors and the pull-payment fallback path). USDC lands in your wallet. If the round is `CANCELLED` (e.g. the seed never arrived), the contract auto-refunds your entry (9.5 USDC; the 0.5 treasury rake is non-refundable) and the script exits.

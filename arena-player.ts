@@ -540,7 +540,7 @@ async function decideAndCommit(execTick: bigint): Promise<void> {
     (action.swaps.length > 0 ? ` · ${action.swaps.length} swap(s)` : "");
 
   log(
-    `${C.cyan}COMMIT${C.reset} t=${execTick}  ` +
+    `${C.cyan}✎ action queued${C.reset} t=${execTick}  ` +
       `payload=${fmtUsd(action.ePayloadProd)}  ` +
       `alpha=${fmtUsd(action.eAlphaProd)}  ` +
       `craft=${fmtUsd(action.eCraft)}  ` +
@@ -604,7 +604,7 @@ async function maybeReveal(execTick: bigint): Promise<void> {
   const p = pending;
   pending = null;
 
-  log(`${C.cyan}REVEAL${C.reset} t=${p.tick}`);
+  log(`${C.cyan}◉ action revealed${C.reset} t=${p.tick}`);
   if (DRY_RUN) {
     lastRevealedTick = p.tick;
     return;
