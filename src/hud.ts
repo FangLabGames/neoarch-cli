@@ -1,8 +1,12 @@
-/// ASCII HUD — a live terminal dashboard rendered alongside the agent loop.
+/// ASCII HUD v2 — a live terminal dashboard rendered alongside the agent loop.
 /// Pure render module: arena-player.ts assembles a HudState each poll and
-/// calls renderHud(); we paint the whole frame with ANSI (no deps, no
-/// alt-screen — Ctrl+C leaves the last frame in the scrollback, which is
-/// useful for postmortems). Disable with --no-hud or by piping stdout.
+/// calls renderHud(); we paint the whole frame with ANSI (no alt-screen —
+/// Ctrl+C leaves the last frame in scrollback for postmortems). Disable with
+/// --no-hud or by piping stdout.
+///
+/// Iconography is deliberately single-width unicode (● ☀ ❄ ⚡ ≋ ▲ ▼ ♥ ✓ ✗ and
+/// the ▁▂▃▄▅▆▇█ spark ramp) — double-width emoji break column math in most
+/// terminals.
 
 export interface HudAgent {
   alive: boolean;
@@ -19,23 +23,30 @@ export interface HudAgent {
 export interface HudState {
   address: string;
   roundAddress: string;
+  roundId: number | null;
   status: number; // ROUND_STATUS enum
   tick: number;
   endTick: number; // 0 until the seed lands (SEC-SEED-1)
+  tickDurationSec: number;
   phase: { name: string; payloadMod: number; ticksRemaining: number } | null;
   aliveCount: number | null;
   totalAgents: number | null;
   prizeVaultCredits: bigint | null;
   agent: HudAgent | null;
+  agentStale: boolean;
+  /// Recent payload samples (6dp ints as numbers) for the sparkline, oldest first.
+  payloadHistory: number[];
+  /// Per-render deltas vs the previous frame (null on the first frame).
+  deltas: { payload: bigint; credits: bigint; alpha: bigint } | null;
   window: "commit" | "reveal" | "closed";
   windowSecsLeft: number;
-  windowTotalSecs: number; // full duration of the current window (bar scale)
-  agentStale: boolean; // latest snapshot read failed — vitals may be outdated
-  pendingTick: number | null; // commit submitted, reveal outstanding
+  windowTotalSecs: number;
+  pendingTick: number | null;
   lastRevealedTick: number | null;
-  lastAction: string | null; // "payload 60% · alpha 25% · craft 15%"
-  brain: string; // "LLM anthropic (claude-…)" | "heuristic balanced"
-  spendLine: string | null; // "$0.42 / $5.00" in LLM mode
+  lastAction: string | null;
+  brain: string;
+  spendUsd: number | null; // LLM spend so far (USD)
+  capUsd: number | null; // cap (USD); 0/null = uncapped
   indexerLink: "off" | "ok" | "error";
   dryRun: boolean;
   logTail: string[];
@@ -45,12 +56,18 @@ const ESC = "\x1b[";
 const R = `${ESC}0m`;
 const DIM = `${ESC}2m`;
 const BOLD = `${ESC}1m`;
-const GREEN = `${ESC}32m`;
 const RED = `${ESC}31m`;
+const GREEN = `${ESC}32m`;
 const YELLOW = `${ESC}33m`;
+const MAGENTA = `${ESC}35m`;
 const CYAN = `${ESC}36m`;
+const BR_GREEN = `${ESC}92m`;
+const BR_YELLOW = `${ESC}93m`;
+const BR_BLUE = `${ESC}94m`;
+const BR_MAGENTA = `${ESC}95m`;
+const BR_CYAN = `${ESC}96m`;
 
-const W = 66; // inner frame width
+const W = 70; // inner frame width
 
 const STATUS_NAME: Record<number, string> = {
   0: "CREATED",
@@ -61,20 +78,22 @@ const STATUS_NAME: Record<number, string> = {
   5: "SEEDING",
 };
 
-/// Consumption is a flat 1e6/tick — payload in "ticks of food" is the most
-/// actionable way to read the stockpile.
+/// Phase styling — icon + color tuned to the vibe of each regime phase.
+const PHASE_STYLE: Record<string, { icon: string; color: string }> = {
+  EXPANSION: { icon: "☀", color: BR_GREEN },
+  "LOAD SHOCK": { icon: "⚡", color: BR_YELLOW },
+  FREEZE: { icon: "❄", color: BR_BLUE },
+  CONGESTION: { icon: "≋", color: BR_MAGENTA },
+};
+
 const PAYLOAD_CONSUMPTION = 1_000_000n;
+const SPARK = "▁▂▃▄▅▆▇█";
 
 const fmt6 = (v: bigint) => (Number(v) / 1e6).toFixed(2);
-
-/// Strip ANSI codes for length math so colored strings pad correctly.
 const visible = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "");
 
 function padLine(content: string): string {
   let c = content;
-  // Overlong lines would push the right border past the frame. Truncating a
-  // COLORED string risks splitting an ANSI sequence, so strip codes first and
-  // render the truncated line dim — losing color on overflow beats corruption.
   if (visible(c).length > W) {
     c = `${DIM}${visible(c).slice(0, W - 1)}…${R}`;
   }
@@ -82,10 +101,35 @@ function padLine(content: string): string {
   return `║ ${c}${" ".repeat(pad)} ║`;
 }
 
-function bar(ratio: number, width: number): string {
+function bar(ratio: number, width: number, color = ""): string {
   const clamped = Math.max(0, Math.min(1, ratio));
   const full = Math.round(clamped * width);
-  return "█".repeat(full) + `${DIM}${"░".repeat(width - full)}${R}`;
+  return `${color}${"█".repeat(full)}${R}${DIM}${"░".repeat(width - full)}${R}`;
+}
+
+function sparkline(samples: number[], width: number): string {
+  if (samples.length < 2) return `${DIM}${"·".repeat(width)}${R}`;
+  const take = samples.slice(-width);
+  const min = Math.min(...take);
+  const max = Math.max(...take);
+  const span = Math.max(1, max - min);
+  const ramp = take
+    .map((v) => SPARK[Math.min(SPARK.length - 1, Math.floor(((v - min) / span) * SPARK.length))])
+    .join("");
+  const rising = take[take.length - 1] >= take[0];
+  return `${rising ? GREEN : RED}${ramp}${R}`;
+}
+
+function delta(v: bigint): string {
+  if (v === 0n) return "";
+  return v > 0n ? ` ${BR_GREEN}▲${fmt6(v)}${R}` : ` ${RED}▼${fmt6(-v)}${R}`;
+}
+
+function eta(ticksLeft: number, tickSec: number): string {
+  const s = ticksLeft * tickSec;
+  const h = Math.floor(s / 3600);
+  const m = Math.round((s % 3600) / 60);
+  return h >= 1 ? `~${h}h ${m}m` : `~${m}m`;
 }
 
 function divider(): string {
@@ -96,37 +140,41 @@ export function renderHud(s: HudState): string {
   const lines: string[] = [];
   const statusName = STATUS_NAME[s.status] ?? `STATUS=${s.status}`;
   const statusColor =
-    s.status === 2 ? GREEN : s.status === 3 ? CYAN : s.status === 4 ? RED : YELLOW;
+    s.status === 2 ? BR_GREEN : s.status === 3 ? BR_CYAN : s.status === 4 ? RED : YELLOW;
 
-  // ── header ──
-  const tickStr = s.endTick > 0 ? `tick ${s.tick}/${s.endTick}` : `tick ${s.tick}`;
-  const title = ` NEOARCH ARENA ${DIM}${s.roundAddress.slice(0, 8)}…${R} ${statusColor}${statusName}${R}`;
-  // Row layout: ║ + title + pad + tick + " ║" must total W+4 like padLine rows.
+  // ── header: round + status + tick + ETA ──
+  const tickStr =
+    s.endTick > 0
+      ? `tick ${s.tick}/${s.endTick} ${DIM}${eta(Math.max(0, s.endTick - s.tick), s.tickDurationSec)}${R}`
+      : `tick ${s.tick}`;
+  const title = ` ${BOLD}NEOARCH${R} ${s.roundId !== null ? `R${s.roundId}` : ""} ${DIM}${s.roundAddress.slice(0, 8)}…${R} ${statusColor}${BOLD}${statusName}${R}`;
   const headPad = Math.max(1, W + 1 - visible(title).length - visible(tickStr).length);
   lines.push(`╔${"═".repeat(W + 2)}╗`);
   lines.push(`║${title}${" ".repeat(headPad)}${tickStr} ║`);
 
-  // ── round context ──
+  // ── phase banner ──
+  const ph = s.phase ? PHASE_STYLE[s.phase.name] : null;
   const phaseStr = s.phase
-    ? `phase ${BOLD}${s.phase.name}${R} ${DIM}(payload ×${s.phase.payloadMod.toFixed(2)}, ${s.phase.ticksRemaining}t left)${R}`
-    : `phase ${DIM}—${R}`;
+    ? `${ph?.color ?? ""}${ph?.icon ?? "·"} ${BOLD}${s.phase.name}${R} ${DIM}payload ×${s.phase.payloadMod.toFixed(2)} · ${s.phase.ticksRemaining}t left${R}`
+    : `${DIM}· phase unknown${R}`;
   const aliveStr =
     s.aliveCount !== null && s.totalAgents !== null
-      ? `alive ${s.aliveCount}/${s.totalAgents}`
+      ? `${BR_GREEN}●${R}${s.aliveCount}${DIM}/${s.totalAgents}${R}`
       : "";
-  const vaultStr = s.prizeVaultCredits !== null ? `vault ${fmt6(s.prizeVaultCredits)}` : "";
+  const vaultStr = s.prizeVaultCredits !== null ? `${DIM}vault${R} ${fmt6(s.prizeVaultCredits)}` : "";
   lines.push(padLine(`${phaseStr}   ${aliveStr}   ${vaultStr}`));
 
-  // ── tick window (active rounds only) ──
+  // ── tick window ──
   if (s.status === 2) {
-    const winColor = s.window === "commit" ? CYAN : s.window === "reveal" ? YELLOW : DIM;
-    const winLabel = s.window.toUpperCase().padEnd(6);
+    const winColor = s.window === "commit" ? BR_CYAN : s.window === "reveal" ? BR_YELLOW : DIM;
+    const winIcon = s.window === "commit" ? "✎" : s.window === "reveal" ? "◉" : "·";
     lines.push(
       padLine(
-        `window ${winColor}${winLabel}${R} ${bar(
+        `${winColor}${winIcon} ${s.window.toUpperCase().padEnd(6)}${R} ${bar(
           s.windowSecsLeft / Math.max(1, s.windowTotalSecs),
-          18,
-        )} ${String(s.windowSecsLeft).padStart(3)}s left`,
+          20,
+          winColor,
+        )} ${String(s.windowSecsLeft).padStart(3)}s`,
       ),
     );
   }
@@ -136,68 +184,80 @@ export function renderHud(s: HudState): string {
   // ── agent vitals ──
   if (s.agent) {
     const a = s.agent;
-    const lifeTicks = Number(a.payload / PAYLOAD_CONSUMPTION);
-    const aliveBadge = a.alive ? `${GREEN}ALIVE${R}` : `${RED}ELIMINATED${R}`;
-    const staleBadge = s.agentStale ? ` ${YELLOW}(stale — rpc read failing)${R}` : "";
+    const runwayTicks = Number(a.payload / PAYLOAD_CONSUMPTION);
+    const aliveBadge = a.alive ? `${BR_GREEN}● ALIVE${R}` : `${RED}✗ ELIMINATED${R}`;
+    const staleBadge = s.agentStale ? ` ${YELLOW}(stale — rpc failing)${R}` : "";
     const missBadge =
-      a.missCount > 0 ? `  ${RED}miss ${a.missCount}/12 (starving)${R}` : "";
+      a.missCount > 0 ? `  ${RED}⚠ starving ${a.missCount}/12${R}` : "";
+    const tierStr =
+      a.moduleTier > 0
+        ? `${BR_CYAN}◆T${a.moduleTier}${R} ${DIM}dur ${fmt6(a.moduleDurability)}${R}`
+        : `${DIM}◇T0${R}`;
     lines.push(
       padLine(
-        `${BOLD}YOU${R} ${DIM}${s.address.slice(0, 6)}…${s.address.slice(-4)}${R}  ${aliveBadge}${staleBadge}  tier ${a.moduleTier}${
-          a.moduleTier > 0 ? ` ${DIM}dur ${fmt6(a.moduleDurability)}${R}` : ""
-        }${missBadge}`,
+        `${BOLD}YOU${R} ${DIM}${s.address.slice(0, 6)}…${s.address.slice(-4)}${R}  ${aliveBadge}${staleBadge}  ${tierStr}${missBadge}`,
       ),
     );
-    const stockColor = lifeTicks <= 3 ? RED : lifeTicks <= 8 ? YELLOW : GREEN;
+    const runwayColor = runwayTicks <= 3 ? RED : runwayTicks <= 8 ? BR_YELLOW : BR_GREEN;
     lines.push(
       padLine(
-        `payload ${bar(Math.min(lifeTicks / 20, 1), 12)} ${stockColor}${fmt6(a.payload)}${R} ${DIM}(≈${lifeTicks}t food)${R}  credits ${fmt6(a.credits)}  alpha ${fmt6(a.alphaBalance)}`,
+        `payload ${bar(Math.min(runwayTicks / 20, 1), 12, runwayColor)} ${runwayColor}${fmt6(a.payload)}${R} ${DIM}(≈${runwayTicks}t runway)${R}${delta(s.deltas?.payload ?? 0n)}`,
       ),
     );
     lines.push(
       padLine(
-        `throughput allowance ${fmt6(a.throughputAllowance)} ${DIM}/ cap ${fmt6(a.throughputCap)}${R}`,
+        `trend   ${sparkline(s.payloadHistory, 24)}  ${DIM}credits${R} ${fmt6(a.credits)}${delta(s.deltas?.credits ?? 0n)}  ${DIM}alpha${R} ${fmt6(a.alphaBalance)}${delta(s.deltas?.alpha ?? 0n)}`,
       ),
+    );
+    lines.push(
+      padLine(`budget  ${DIM}throughput${R} ${fmt6(a.throughputAllowance)} ${DIM}/ cap ${fmt6(a.throughputCap)}${R}`),
     );
   } else {
     lines.push(padLine(`${DIM}agent state not loaded yet…${R}`));
   }
 
-  // ── action state machine ──
+  // ── action state ──
   const stateBits: string[] = [];
-  if (s.lastRevealedTick !== null) stateBits.push(`${GREEN}revealed t${s.lastRevealedTick} ✓${R}`);
-  if (s.pendingTick !== null) stateBits.push(`${CYAN}committed t${s.pendingTick}${R} ${DIM}(awaiting reveal)${R}`);
+  if (s.lastRevealedTick !== null) stateBits.push(`${BR_GREEN}✓ revealed t${s.lastRevealedTick}${R}`);
+  if (s.pendingTick !== null) stateBits.push(`${BR_CYAN}✎ committed t${s.pendingTick}${R} ${DIM}(awaiting reveal)${R}`);
   if (stateBits.length === 0) stateBits.push(`${DIM}no action in flight${R}`);
-  lines.push(padLine(`state ${stateBits.join("  →  ")}`));
-  if (s.lastAction) lines.push(padLine(`last  ${s.lastAction}`));
+  lines.push(padLine(`state   ${stateBits.join("  →  ")}`));
+  if (s.lastAction) lines.push(padLine(`last    ${CYAN}${s.lastAction}${R}`));
 
   lines.push(divider());
 
-  // ── brain + link footer ──
+  // ── brain + spend + link footer ──
   const linkStr =
     s.indexerLink === "off"
       ? `${DIM}indexer off${R}`
       : s.indexerLink === "ok"
-        ? `${GREEN}♥ indexer linked${R}`
+        ? `${BR_GREEN}♥ linked${R}`
         : `${YELLOW}indexer unreachable${R}`;
-  const dryStr = s.dryRun ? `  ${YELLOW}DRY-RUN${R}` : "";
-  lines.push(
-    padLine(`brain ${s.brain}${s.spendLine ? `  ${DIM}spend${R} ${s.spendLine}` : ""}  ${linkStr}${dryStr}`),
-  );
+  const spendStr =
+    s.spendUsd !== null && s.capUsd
+      ? `${DIM}spend${R} ${bar(s.spendUsd / s.capUsd, 8, s.spendUsd / s.capUsd > 0.8 ? RED : MAGENTA)} $${s.spendUsd.toFixed(2)}${DIM}/$${s.capUsd.toFixed(0)}${R}`
+      : s.spendUsd !== null
+        ? `${DIM}spend${R} $${s.spendUsd.toFixed(2)}`
+        : "";
+  const dryStr = s.dryRun ? `  ${BR_YELLOW}DRY-RUN${R}` : "";
+  lines.push(padLine(`${MAGENTA}⚙${R} ${s.brain}  ${spendStr}  ${linkStr}${dryStr}`));
 
   // ── log tail ──
   if (s.logTail.length > 0) {
     lines.push(divider());
     for (const l of s.logTail.slice(-5)) {
-      // Strip ANSI BEFORE truncating — slicing a colored string can split an
-      // escape sequence and leak raw CSI bytes into the terminal.
       const vis = visible(l);
       const trimmed = vis.length > W ? vis.slice(0, W - 1) + "…" : vis;
-      lines.push(padLine(`${DIM}${trimmed}${R}`));
+      // Re-tint after stripping: errors red, confirmations green, rest dim.
+      const tint = /✗|revert|failed|error/i.test(trimmed)
+        ? RED
+        : /✓|relayed|published|settled|joined/i.test(trimmed)
+          ? GREEN
+          : DIM;
+      lines.push(padLine(`${tint}${trimmed}${R}`));
     }
   }
 
   lines.push(`╚${"═".repeat(W + 2)}╝`);
-  // Clear screen + home cursor, then the frame.
   return `${ESC}2J${ESC}H` + lines.join("\n") + "\n";
 }

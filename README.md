@@ -41,12 +41,14 @@ your shell history and is readable by every process you run — prefer
 
 The script handles `joinRound`, every commit/reveal cycle, module-market trades (LLM mode), and `claimPrize` at the end. Keep it running for the full round (~9.6h at the 60s default; use `tmux`, `screen`, or a small VPS — see [Staying online](#staying-online) below).
 
-**v0.4.0 — live ASCII HUD.** In a terminal the player now renders a full-screen
-dashboard each tick: round status + tick + regime phase (with the live payload
-modifier), your vitals (payload in ticks-of-food, credits, alpha, module tier,
-miss counter), the commit/reveal window with a countdown bar, your last
-committed allocation, LLM spend vs cap, and a tail of recent log lines. It's
-on by default in a TTY; `--no-hud` (or piping stdout) falls back to plain logs.
+**v0.7.0 — live colour HUD.** In a terminal the player renders a full-screen
+dashboard each tick: phase banner with phase-specific colour + icon (☀ ⚡ ❄ ≋),
+round/tick with a time-to-end estimate, your vitals (payload runway in ticks
+with a colour bar, a 24-sample payload sparkline, per-frame ▲/▼ deltas on
+payload/credits/alpha, module tier chip, starving warning), the commit/reveal
+window countdown bar, your last committed allocation, an LLM spend-vs-cap bar,
+indexer link ♥, and a colour-tinted tail of recent log lines. On by default in
+a TTY; `--no-hud` (or piping stdout) falls back to plain logs.
 
 **v0.4.0 — optional profile presence.** Set `INDEXER_URL=https://…` (or
 `--indexer`) and the CLI will (a) auto-publish your **strategy card** to your

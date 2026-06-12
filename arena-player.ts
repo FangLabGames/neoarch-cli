@@ -211,6 +211,10 @@ let lastActionSummary: string | null = null;
 let lastRevealedTick: number | null = null;
 let indexerLink: LinkStatus = INDEXER_URL ? "error" : "off";
 let lastHudRenderMs = 0;
+// HUD v2 extras: payload sparkline samples, per-frame deltas, round id.
+const payloadHistory: number[] = [];
+let prevRendered: AgentSnapshot | null = null;
+let roundIdNum: number | null = null;
 
 /// Round-context reads for the HUD frame. Each is best-effort — a failed read
 /// renders as "—" rather than breaking the loop. Throttled by maybeRenderHud.
@@ -258,7 +262,20 @@ async function maybeRenderHud(
       return lastSnapshot;
     }),
   ]);
-  if (snap && !agentStale) lastSnapshot = snap;
+  let deltas: { payload: bigint; credits: bigint; alpha: bigint } | null = null;
+  if (snap && !agentStale) {
+    lastSnapshot = snap;
+    payloadHistory.push(Number(snap.payload));
+    if (payloadHistory.length > 32) payloadHistory.shift();
+    if (prevRendered) {
+      deltas = {
+        payload: snap.payload - prevRendered.payload,
+        credits: snap.credits - prevRendered.credits,
+        alpha: snap.alphaBalance - prevRendered.alphaBalance,
+      };
+    }
+    prevRendered = snap;
+  }
 
   const now = Math.floor(nowMs / 1000);
   const tickStart = Number(timing.lastTs);
@@ -284,9 +301,11 @@ async function maybeRenderHud(
     renderHud({
       address: account.address,
       roundAddress: ROUND_ADDRESS,
+      roundId: roundIdNum,
       status: timing.status,
       tick: Number(timing.tick),
       endTick: endTickNum,
+      tickDurationSec,
       phase: extras.phase,
       aliveCount: extras.aliveCount,
       totalAgents: extras.totalAgents,
@@ -296,13 +315,16 @@ async function maybeRenderHud(
       windowSecsLeft,
       windowTotalSecs,
       agentStale,
+      payloadHistory,
+      deltas,
       pendingTick: pending?.tick ?? null,
       lastRevealedTick,
       lastAction: lastActionSummary,
       brain: llm
         ? `LLM ${LLM_PROVIDER}${LLM_MODEL ? ` (${LLM_MODEL})` : ""}`
         : `heuristic ${STRATEGY}`,
-      spendLine: spend ? formatSpend(spend) : null,
+      spendUsd: spend ? spend.totalMicro / 1e6 : null,
+      capUsd: llm && CAP_USD > 0 ? CAP_USD : null,
       indexerLink,
       dryRun: DRY_RUN,
       logTail: logRing,
@@ -398,6 +420,13 @@ async function loadRoundTiming(): Promise<void> {
     log(`  timing:   ${tickDurationSec}s tick / ${commitWindowSec}s commit (from chain)`);
   } catch {
     log(`  timing:   ${tickDurationSec}s tick / ${commitWindowSec}s commit (chain read failed — using defaults)`);
+  }
+  try {
+    roundIdNum = Number(
+      await publicClient.readContract({ address: ROUND_ADDRESS, abi: atrRoundAbi, functionName: "roundId" }),
+    );
+  } catch {
+    roundIdNum = null;
   }
 }
 
