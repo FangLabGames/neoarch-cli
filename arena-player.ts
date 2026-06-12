@@ -77,6 +77,7 @@ import {
   startHeartbeat,
   type LinkStatus,
 } from "./src/indexer-link.ts";
+import { ensureRegistered } from "./src/identity.ts";
 
 // ─── Pretty logging ─────────────────────────────────────────────────
 const C = {
@@ -129,6 +130,11 @@ const INDEXER_URL = flag("indexer", process.env.INDEXER_URL ?? "").replace(/\/$/
 // v0.4.0 — live ASCII HUD. On by default in a TTY; --no-hud (or piping
 // stdout) falls back to plain log lines.
 const HUD_ENABLED = !has("no-hud") && Boolean(process.stdout.isTTY);
+// v0.4.2 — agent display name for the self-serve ERC-8004 registration
+// (only used when the wallet isn't registered yet; ≤32 chars like the web).
+// Empty → defaults to cli-<addr-prefix> at registration time (the account
+// isn't derived yet at flag-parse time).
+const AGENT_NAME_FLAG = flag("name", process.env.AGENT_NAME ?? "").slice(0, 32);
 
 if (!AGENT_PK || !AGENT_PK.startsWith("0x") || AGENT_PK.length !== 66) {
   fatal("set AGENT_PK=0x<64-hex-chars> in env (your wallet private key — never sent anywhere)");
@@ -792,6 +798,14 @@ async function linkIndexer(): Promise<void> {
 // ─── Boot ───────────────────────────────────────────────────────────
 (async () => {
   try {
+    // Self-serve ERC-8004 registration (v0.4.2): joinRound reverts for
+    // unverified wallets, and the register txs are plain self-mints this
+    // wallet can send itself — no web step needed. Skipped with --no-join
+    // (you manage join readiness) and --dry-run (no txs).
+    if (!SKIP_JOIN && !DRY_RUN) {
+      const agentName = AGENT_NAME_FLAG || `cli-${account.address.slice(2, 8)}`;
+      await ensureRegistered(publicClient, walletClient, account.address, agentName, log);
+    }
     await ensureJoined();
     await loadRoundTiming();
     await linkIndexer();
