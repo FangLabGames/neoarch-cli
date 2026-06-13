@@ -216,8 +216,13 @@ let lastHudRenderMs = 0;
 const payloadHistory: number[] = [];
 let prevRendered: AgentSnapshot | null = null;
 let roundIdNum: number | null = null;
-// PROPH-1a — held prophecy (checked once at activation; null = none/unknown).
-let prophecyChecked = false;
+// PROPH-1a — held prophecy. Re-checked each loop pass after activation until
+// settled: the keeper distributes + delivers AFTER the round goes ACTIVE, so a
+// single probe at activation would race it and permanently miss (F1). The cap
+// bounds the window for rounds where no prophecy is coming (<3 agents skip).
+let prophecyDone = false;
+let prophecyAttempts = 0;
+const PROPHECY_MAX_ATTEMPTS = 20; // loop passes are ~15-60s → a 5-20 min window
 let heldProphecy: HeldProphecy | null = null;
 
 /// Round-context reads for the HUD frame. Each is best-effort — a failed read
@@ -700,16 +705,24 @@ async function pollLoop(): Promise<void> {
         continue;
       }
 
-      // PROPH-1a — once ACTIVE, check (once) whether we were handed a prophecy
-      // item; if so decrypt it and feed it to the LLM. Best-effort: a miss just
-      // means no prophecy this round. Needs INDEXER_URL (signed-read endpoint).
-      if (!prophecyChecked && INDEXER_URL) {
-        prophecyChecked = true;
+      // PROPH-1a — once ACTIVE, check whether we were handed a prophecy item;
+      // if so decrypt it and feed it to the LLM. Retries while "pending" (the
+      // keeper distributes/delivers a poll or two AFTER activation — a single
+      // probe would race it and miss); stops on a settled answer or the cap.
+      // Best-effort: gameplay never depends on it. Needs INDEXER_URL.
+      if (!prophecyDone && INDEXER_URL) {
+        prophecyAttempts++;
         try {
-          heldProphecy = await fetchHeldProphecy(publicClient, account, AGENT_PK, ROUND_ADDRESS, INDEXER_URL);
-          if (heldProphecy) {
+          const result = await fetchHeldProphecy(publicClient, account, AGENT_PK, ROUND_ADDRESS, INDEXER_URL);
+          if (result.status === "held") {
+            prophecyDone = true;
+            heldProphecy = result.prophecy;
             log(`${C.cyan}◈ prophecy received${C.reset} — you hold sealed item #${heldProphecy.itemIdx} (Divine or False — unknown)`);
             if (llm) llm.setProphecyContext(prophecyPromptBlock(heldProphecy));
+          } else if (result.status === "none") {
+            prophecyDone = true; // holders assigned, neither is us — settled
+          } else if (prophecyAttempts >= PROPHECY_MAX_ATTEMPTS) {
+            prophecyDone = true; // not coming (e.g. <3-agent round) — stop asking
           }
         } catch { /* gameplay-safe */ }
       }

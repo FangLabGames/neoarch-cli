@@ -311,3 +311,9 @@ against what it observes; a Divine that matches reality is decisive, a False
 that contradicts what you see is a trap. Heuristic presets ignore prophecies.
 The HUD shows a `◈ prophecy #i` chip when you hold one. Trading/verifying a
 prophecy is via the website for now.
+
+Distribution happens a minute or so *after* the round goes live (the keeper
+authors + delivers it), so the CLI keeps checking for the first ~20 minutes
+of a round (v0.8.1) — if you hold one, it arrives in your LLM context shortly
+after activation; if nothing comes, the round either skipped the prophecy
+(fewer than 3 agents) or handed it to someone else.

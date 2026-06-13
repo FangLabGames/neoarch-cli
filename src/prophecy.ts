@@ -29,7 +29,7 @@ const prophecyAbi = [
     outputs: [{ type: "bytes32" }, { type: "address" }, { type: "bool" }, { type: "bool" }] },
 ] as const;
 
-const hexToBytes = (h: string): Uint8Array => {
+export const hexToBytes = (h: string): Uint8Array => {
   const s = h.startsWith("0x") ? h.slice(2) : h;
   const out = new Uint8Array(s.length / 2);
   for (let i = 0; i < out.length; i++) out[i] = parseInt(s.substr(i * 2, 2), 16);
@@ -37,11 +37,13 @@ const hexToBytes = (h: string): Uint8Array => {
 };
 const bytesToHex = (b: Uint8Array): string => Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
 
-interface EciesEnvelope { v: 1; eph: string; iv: string; ct: string }
+export interface EciesEnvelope { v: 1; eph: string; iv: string; ct: string }
 
 /// Decrypt an ECIES envelope with the agent private key (counterpart of the
 /// keeper's eciesEncrypt; same HKDF "proph-1a" info + AES-256-GCM).
-function eciesDecrypt(privKeyHex: string, env: EciesEnvelope): string {
+/// Exported so the keeper repo's cross-module compatibility test can exercise
+/// THIS exact implementation against its encryptor — the delivery contract.
+export function eciesDecrypt(privKeyHex: string, env: EciesEnvelope): string {
   const priv = hexToBytes(privKeyHex);
   const eph = secp256k1.ProjectivePoint.fromHex(env.eph);
   const shared = eph.multiply(BigInt("0x" + bytesToHex(priv))).toRawBytes(true);
@@ -85,37 +87,58 @@ async function signedGet(indexerUrl: string, signer: Signer, path: string): Prom
   return res.json();
 }
 
+/// Outcome of a prophecy check. "pending" means "ask again next loop pass":
+/// the keeper distributes + delivers AFTER the round goes ACTIVE (its own
+/// poll → tx → envelope POST), so an agent probing at activation almost
+/// always lands before the items exist — treating that as a permanent "no"
+/// was the F1 race that made holders miss their prophecy for the whole round.
+export type ProphecyFetchResult =
+  | { status: "held"; prophecy: HeldProphecy }
+  | { status: "none" }      // terminal: distributed and neither item is ours
+  | { status: "pending" };  // retry: not distributed yet / envelope not posted yet / transient failure
+
 /// Check whether this agent holds a prophecy item in `roundAddress`, and if so
 /// fetch + decrypt it. `privKeyHex` is the agent's key (for ECIES decrypt).
-/// Returns null on no-holding / any failure (gameplay-safe).
+/// Never throws (gameplay-safe).
 export async function fetchHeldProphecy(
   publicClient: PublicClient,
   signer: Signer,
   privKeyHex: Hex,
   roundAddress: Address,
   indexerUrl: string,
-): Promise<HeldProphecy | null> {
+): Promise<ProphecyFetchResult> {
   try {
     const roundId = (await publicClient.readContract({ address: roundAddress, abi: roundAbi, functionName: "roundId" })) as bigint;
     const info = (await publicClient.readContract({ address: ATR_FACTORY, abi: factoryAbi, functionName: "rounds", args: [roundId] })) as any;
     const clone = info[2] as Address;
-    if (!clone || /^0x0+$/.test(clone)) return null;
+    if (!clone || /^0x0+$/.test(clone)) return { status: "none" };
 
+    let anyHolderSet = false;
     for (let idx = 0; idx < 2; idx++) {
       const item = (await publicClient.readContract({ address: clone, abi: prophecyAbi, functionName: "items", args: [BigInt(idx)] })) as any;
       const holder = item[1] as Address;
-      if (holder?.toLowerCase() !== signer.address.toLowerCase()) continue;
+      if (!holder || /^0x0+$/.test(holder)) continue;
+      anyHolderSet = true;
+      if (holder.toLowerCase() !== signer.address.toLowerCase()) continue;
 
+      // We hold this item. The envelope may lag the on-chain distribution by
+      // a keeper poll (or a 401 from a nonce race) — retry until it arrives.
       const resp = await signedGet(indexerUrl, signer, `/api/atr/prophecy/${roundId}/${idx}`);
-      if (!resp?.encrypted_payload) return null;
+      if (!resp?.encrypted_payload) return { status: "pending" };
       const env = JSON.parse(resp.encrypted_payload) as EciesEnvelope;
       const inner = JSON.parse(eciesDecrypt(privKeyHex, env)) as { payloadHex: Hex; salt: Hex };
       const payload = JSON.parse(new TextDecoder().decode(hexToBytes(inner.payloadHex))) as { endTick: number; phaseOrder: number[] };
-      return { itemIdx: idx, endTick: payload.endTick, phaseOrder: payload.phaseOrder, payloadHex: inner.payloadHex, salt: inner.salt };
+      return {
+        status: "held",
+        prophecy: { itemIdx: idx, endTick: payload.endTick, phaseOrder: payload.phaseOrder, payloadHex: inner.payloadHex, salt: inner.salt },
+      };
     }
-    return null;
+    // Holders assigned and neither is us — settled, stop asking. Nothing
+    // assigned yet — the keeper hasn't distributed (or skipped a <3-agent
+    // round); the caller's attempt cap bounds the retries.
+    return anyHolderSet ? { status: "none" } : { status: "pending" };
   } catch {
-    return null;
+    return { status: "pending" }; // transient RPC/parse failure — retry
   }
 }
 
