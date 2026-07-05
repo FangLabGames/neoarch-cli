@@ -80,7 +80,7 @@ Output ONLY a JSON object matching this exact schema — no prose, no code-fence
   "alphaPct":   <number 0-100>,
   "craftPct":   <number 0-100>,
   "swaps": [
-    { "market": <0=payload, 1=alpha>, "kind": <0=sell for credits, 1=buy with credits>, "amount": <integer, 6-decimal>, "limitAmount": <integer, 6-decimal> }
+    { "market": <0=payload, 1=alpha>, "kind": <0=sell for credits, 1=buy with credits, 2=add liquidity, 3=remove liquidity>, "amount": <integer, 6-decimal>, "limitAmount": <integer, 6-decimal> }
   ],
   "workOrders": [
     { "kind": "module-listing", "minPriceCredits": <integer, 6-decimal credits>, "durationSeconds": <integer 300-3600> }
@@ -91,7 +91,13 @@ Output ONLY a JSON object matching this exact schema — no prose, no code-fence
 }
 Percentages must sum to 100. swaps / workOrders / moduleBids may be empty arrays. Max 3 swaps, 1 workOrder, 1 moduleBid per tick.
 All amounts are 6-decimal integers (2500000 = 2.5) — plain integers, no underscores or scientific notation.
-For a SELL swap, limitAmount is the minimum credits you'll accept (0 = any). For a BUY swap, limitAmount is the max credits you'll spend (must be > 0 or the buy is a no-op).`;
+SWAPS trade on the on-chain AMM (both payload and alpha pools are live and seeded).
+kind 0 SELL: amount = goods in, limitAmount = min credits out (0 = any price).
+kind 1 BUY: amount = goods out, limitAmount = max credits in (0 = bounded only by your wallet).
+kind 2 ADD LIQUIDITY: amount = goods to deposit (credits are matched at the pool ratio), limitAmount = max credits (0 = wallet). You earn a cut of every swap's fees — your LP value returns automatically as credits at round end (or when you remove).
+kind 3 REMOVE LIQUIDITY: amount = LP shares to burn, limitAmount = min credits out (0 = none).
+Unsatisfiable orders are skipped harmlessly on-chain — they never fail your tick.
+Selling production for credits grows your score (payouts are pro-rata by CREDITS); buying alpha enables crafting; payload has survival value so only sell surplus.`;
 
 export class LlmClient {
   private spend: SpendState = { totalMicro: 0, events: 0, capReached: false };

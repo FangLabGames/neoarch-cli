@@ -19,9 +19,9 @@ import { atrRoundAbi, arcTestnet } from "./abi.ts";
 
 export interface SwapOrder {
   market: number;       // 0=PAYLOAD, 1=ALPHA
-  kind: number;         // 0=SELL_A_FOR_B, 1=BUY_A_WITH_B
-  amount: bigint;       // amountIn (sell) or amountOut (buy)
-  limitAmount: bigint;  // minOut (sell) or maxIn (buy)
+  kind: number;         // 0=SELL_A_FOR_B, 1=BUY_A_WITH_B, 2=ADD_LIQUIDITY, 3=REMOVE_LIQUIDITY (ECON-AMM-1)
+  amount: bigint;       // amountIn (sell) / amountOut (buy) / goods offered (add) / shares to burn (remove)
+  limitAmount: bigint;  // minOut (sell/remove) or max credits (buy/add); 0 = wallet-bounded on buy/add
 }
 
 export interface AgentAction {

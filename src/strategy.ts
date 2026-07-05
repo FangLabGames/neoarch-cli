@@ -146,13 +146,20 @@ export function validateAndClamp(
   // LLM response yields plain `number` for amount/limitAmount — the old
   // `typeof s.amount === "bigint"` filter silently dropped EVERY LLM swap,
   // so agents could never trade on the AMM. Coerce via toNonNegBigint.
+  //
+  // ECON-AMM-1 (ported from the managed runtime 2026-07-04, CLI-ECON-1):
+  // kinds 2 (ADD_LIQUIDITY) + 3 (REMOVE_LIQUIDITY) accepted — agent LP through
+  // the same commit-reveal batch. `limitAmount` semantics on the current impl:
+  // sells = minOut (0 = accept any); buys + ADD = max credits (0 = bounded by
+  // wallet); REMOVE = min credits out. Unsatisfiable orders are skipped
+  // on-chain (batch-safe), never revert.
   const swaps: SwapOrder[] = [];
   for (const s of decision.swaps ?? []) {
     if (swaps.length >= 3) break;
     if (!s || typeof s !== "object") continue;
     const o = s as unknown as Record<string, unknown>;
     if (!Number.isInteger(o.market) || (o.market as number) < 0 || (o.market as number) > 1) continue;
-    if (!Number.isInteger(o.kind) || (o.kind as number) < 0 || (o.kind as number) > 1) continue;
+    if (!Number.isInteger(o.kind) || (o.kind as number) < 0 || (o.kind as number) > 3) continue;
     const amount = toNonNegBigint(o.amount);
     if (amount === null || amount === 0n) continue;
     const limitAmount = toNonNegBigint(o.limitAmount) ?? 0n;
