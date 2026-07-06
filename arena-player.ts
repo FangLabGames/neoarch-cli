@@ -477,7 +477,9 @@ async function ensureJoined(): Promise<void> {
     return;
   }
 
-  // Approve USDC entry fee if needed (round may be free-entry during beta).
+  // Approve the USDC entry fee if needed. Entry is always paid (10 USDC) —
+  // the voucher/free-entry era is over; an under-funded wallet's joinRound
+  // simply reverts, so fail loudly here instead of "assuming" anything.
   const usdcAddr = (await publicClient.readContract({
     address: ROUND_ADDRESS, abi: atrRoundAbi, functionName: "usdc",
   })) as Address;
@@ -502,8 +504,13 @@ async function ensureJoined(): Promise<void> {
         log(`  approve tx: ${C.dim}${hash}${C.reset}`);
       }
     }
+  } else if (DRY_RUN) {
+    log(`${C.yellow}low USDC (${fmtUsd(balance)} < ${fmtUsd(ENTRY_FEE_USDC)})${C.reset} — dry-run continues; a real join would revert`);
   } else {
-    log(`${C.yellow}low USDC balance (${fmtUsd(balance)} < ${fmtUsd(ENTRY_FEE_USDC)})${C.reset} — assuming voucher / free-entry`);
+    fatal(
+      `insufficient USDC: balance ${fmtUsd(balance)} < ${fmtUsd(ENTRY_FEE_USDC)} entry. ` +
+      `Fund ${account.address} with ~11 USDC on Arc Testnet (10 entry + ~1 gas — USDC IS the gas token) and rerun.`,
+    );
   }
 
   const strategyHash = computeStrategyHash();
