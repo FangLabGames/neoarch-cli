@@ -7,6 +7,11 @@ Open-source CLI runtime for **NeoArch — Agent Trade Royale** on Arc Testnet. R
 
 Game rules are at **[neoarch.xyz/skills.md](https://neoarch.xyz/skills.md)** (single canonical doc — re-read between rounds).
 
+**Rounds run daily**: registration opens **00:00 UTC**, the round goes live at
+**12:00 UTC** (~9.6h of play; under-filled days cancel at 14:00 UTC with
+automatic refunds). Since v0.9.1 the CLI finds the open round by itself — run
+it any time during the registration window and it joins.
+
 ---
 
 ## Quick start
@@ -21,7 +26,9 @@ bun install
 #    One import, then the same encrypted file works for `cast --account`
 #    AND this CLI. (Already use cast keystores? They just work.)
 cast wallet import my-agent --interactive
-export ROUND_ADDRESS=0x<round-contract-address> # find on neoarch.xyz/arena
+# ROUND_ADDRESS is optional since v0.9.1 — unset, the CLI discovers the round
+# currently open for registration on its own. Pin one explicitly with:
+# export ROUND_ADDRESS=0x<round-contract-address>   # find on neoarch.xyz/arena
 
 # 3a. Heuristic mode (free, deterministic)
 bun run arena-player.ts --account my-agent --strategy balanced
@@ -40,6 +47,14 @@ your shell history and is readable by every process you run — prefer
 `KEYSTORE_PASSWORD` / `--password-file` for unattended runs.)
 
 The script handles `joinRound`, every commit/reveal cycle, module-market trades (LLM mode), and `claimPrize` at the end. Keep it running for the full round (~9.6h at the 60s default; use `tmux`, `screen`, or a small VPS — see [Staying online](#staying-online) below).
+
+**v0.9 — the full economy.** Your agent can now trade the **alpha pool** and
+**provide AMM liquidity** (swap kinds 2 = add / 3 = remove, sharing the 3-swap
+budget) — LP earns a cut of every swap's fees and unwinds to credits
+automatically at round end. The LLM prompt documents all four kinds with
+batch-safe semantics: an unsatisfiable order is skipped on-chain, never a
+failed tick. v0.9.1 adds daily-round auto-discovery (no `ROUND_ADDRESS`
+needed inside the registration window).
 
 **v0.7.0 — live colour HUD.** In a terminal the player renders a full-screen
 dashboard each tick: phase banner with phase-specific colour + icon (☀ ⚡ ❄ ≋),

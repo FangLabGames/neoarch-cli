@@ -123,7 +123,7 @@ const { pk: AGENT_PK, source: KEY_SOURCE } = await loadPrivateKey({
   envPk: process.env.AGENT_PK,
   envPkName: "AGENT_PK",
 }).catch((e) => fatal(e?.message ?? String(e)));
-const ROUND_ADDRESS = (process.env.ROUND_ADDRESS ?? flag("round")) as Address;
+let ROUND_ADDRESS = (process.env.ROUND_ADDRESS ?? flag("round")) as Address;
 const RPC = flag("rpc", process.env.RPC ?? "https://rpc.testnet.arc.network");
 const STRATEGY = flag("strategy", "balanced") as Strategy;
 const LLM_PROVIDER = flag("llm", process.env.LLM_PROVIDER ?? "") as Provider | "";
@@ -146,8 +146,30 @@ const HUD_ENABLED = !has("no-hud") && Boolean(process.stdout.isTTY);
 // isn't derived yet at flag-parse time).
 const AGENT_NAME_FLAG = flag("name", process.env.AGENT_NAME ?? "").slice(0, 32);
 
+// v0.9.1 — daily-cadence DX: with no ROUND_ADDRESS given, discover the round
+// currently open for registration from the public indexer. Rounds open every
+// day at 00:00 UTC and go live at 12:00 UTC, so `bun run arena-player.ts
+// --account my-agent` with no env is a complete daily invocation.
+if (!ROUND_ADDRESS) {
+  const base = (INDEXER_URL || "https://neoarch.xyz").replace(/\/$/, "");
+  try {
+    const r = await fetch(`${base}/api/atr/rounds?status=registration`, {
+      signal: AbortSignal.timeout(10_000),
+    });
+    const d = (await r.json()) as { rounds?: Array<{ round_id: number; round_address: string }> };
+    const open = d?.rounds?.[0];
+    if (open?.round_address) {
+      ROUND_ADDRESS = open.round_address as Address;
+      log(`${C.green}auto-discovered${C.reset} round #${open.round_id} open for registration (${base})`);
+    }
+  } catch {
+    /* discovery is best-effort; the check below gives the actionable error */
+  }
+}
 if (!ROUND_ADDRESS || !ROUND_ADDRESS.startsWith("0x") || ROUND_ADDRESS.length !== 42) {
-  fatal("set ROUND_ADDRESS=0x<40-hex-chars> in env or pass --round 0x... (find on neoarch.xyz/arena)");
+  fatal(
+    "no ROUND_ADDRESS set and no round currently open for registration — daily rounds open 00:00 UTC and start 12:00 UTC. Set ROUND_ADDRESS=0x… / --round 0x… (find it on neoarch.xyz/arena) or try again inside the registration window.",
+  );
 }
 if (!["payload", "balanced", "craft"].includes(STRATEGY)) {
   fatal(`unknown --strategy "${STRATEGY}" — must be one of: payload, balanced, craft`);
@@ -181,7 +203,7 @@ const llm: LlmClient | null =
     : null;
 
 // ─── Banner ─────────────────────────────────────────────────────────
-log(`${C.cyan}NeoArch Arena Player${C.reset} v0.4.0`);
+log(`${C.cyan}NeoArch Arena Player${C.reset} v0.9.1`); // keep in sync with package.json
 log(`  agent:    ${C.bold}${account.address}${C.reset}`);
 log(`  key:      ${KEY_SOURCE}`);
 log(`  round:    ${ROUND_ADDRESS}`);
