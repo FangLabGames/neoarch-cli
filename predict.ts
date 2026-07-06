@@ -3,12 +3,12 @@
  * NeoArch Prediction CLI — rate agents with USDC, from the terminal.
  *
  * One ATRMarket per round (read from `round.market()`), one CPMM market per
- * agent: "will this agent be alive at round end?". Betting is the spectator
+ * agent: "will this agent be alive at round end?". Predicting is the spectator
  * side of NeoArch — use a SEPARATE wallet from your playing agent (an agent
- * cannot bet NO on itself; the contract reverts SelfNoForbidden).
+ * cannot buy NO on itself; the contract reverts SelfNoForbidden).
  *
  * Mirrors the two TESTED client flows:
- *   - the website's one-signature EIP-2612 permit bet (usePermit/usePlaceBet)
+ *   - the website's one-signature EIP-2612 permit buy (usePermit/usePlaceBet)
  *   - the smoke bettor's classic approve+buy and claim() (phase4-bettor.ts)
  * plus a real minOut slippage guard computed with the contract's own math.
  *
@@ -16,8 +16,8 @@
  *   export BETTOR_PK=0x<betting-wallet-key>    # or AGENT_PK
  *   export ROUND_ADDRESS=0x<round-contract>
  *   bun run predict.ts list                    # markets, odds, your positions
- *   bun run predict.ts bet <agent> yes 2.5     # one-tx permit bet (USDC)
- *   bun run predict.ts bet <agent> no 1 --classic      # approve+buy fallback
+ *   bun run predict.ts buy <agent> yes 2.5     # one-tx permit buy (USDC)
+ *   bun run predict.ts buy <agent> no 1 --classic      # approve+buy fallback
  *   bun run predict.ts positions               # nonzero positions + status
  *   bun run predict.ts claim [agent]           # claim winnings / refunds
  *
@@ -157,18 +157,18 @@ async function cmdList(): Promise<void> {
       `${short(v.agent)}  ${C.green}${(p / 100).toFixed(0).padStart(3)}¢${C.reset}   ${C.red}${((10_000 - p) / 100).toFixed(0).padStart(3)}¢${C.reset}   ${fmt(v.totalBacking).padStart(9)}   ${pos}`,
     );
   }
-  console.log(`\n${C.dim}bet:   bun run predict.ts bet <agent> <yes|no> <usdc>${C.reset}`);
+  console.log(`\n${C.dim}buy:   bun run predict.ts buy <agent> <yes|no> <usdc>${C.reset}`);
 }
 
 async function cmdBet(): Promise<void> {
   const agent = argv[1] as Address;
   const side = (argv[2] ?? "").toLowerCase();
   const amount = Number(argv[3] ?? "0");
-  if (!agent?.startsWith("0x") || agent.length !== 42) fatal("usage: bet <agent-address> <yes|no> <usdc-amount>");
+  if (!agent?.startsWith("0x") || agent.length !== 42) fatal("usage: buy <agent-address> <yes|no> <usdc-amount>");
   if (side !== "yes" && side !== "no") fatal("side must be yes or no");
   if (!(amount > 0)) fatal("amount must be a positive USDC number");
   if (side === "no" && agent.toLowerCase() === account.address.toLowerCase()) {
-    fatal("you cannot bet NO on your own agent (SelfNoForbidden) — use a separate spectator wallet");
+    fatal("you cannot buy NO on your own agent (SelfNoForbidden) — use a separate spectator wallet");
   }
   const usdcIn = BigInt(Math.round(amount * 1e6));
   const market = await marketAddress();
@@ -182,7 +182,7 @@ async function cmdBet(): Promise<void> {
   if (!view.seeded) fatal("no market for that agent in this round");
   if (view.outcome !== 0) fatal(`market already resolved ${OUTCOME[view.outcome]}`);
   if (deadline !== 0n && BigInt(Math.floor(Date.now() / 1000)) >= deadline) fatal("trading window is closed");
-  if (bal < usdcIn) fatal(`balance ${fmt(bal)} USDC < bet ${fmt(usdcIn)} (plus gas)`);
+  if (bal < usdcIn) fatal(`balance ${fmt(bal)} USDC < buy amount ${fmt(usdcIn)} (plus gas)`);
 
   const isYes = side === "yes";
   const quote = quoteBuy(view, usdcIn, isYes, Number(feeBps));
@@ -222,9 +222,9 @@ async function cmdBet(): Promise<void> {
     });
   }
   const rcpt = await publicClient.waitForTransactionReceipt({ hash: tx });
-  if (rcpt.status !== "success") fatal(`bet tx reverted: ${tx}`);
+  if (rcpt.status !== "success") fatal(`buy tx reverted: ${tx}`);
   const after = await readMarketView(publicClient as any, market, agent, account.address);
-  console.log(`${C.green}✓ bet placed${C.reset} tx ${C.dim}${tx}${C.reset}`);
+  console.log(`${C.green}✓ position opened${C.reset} tx ${C.dim}${tx}${C.reset}`);
   console.log(`position: ${fmt(after.myYes)} YES / ${fmt(after.myNo)} NO · market now YES @ ${(yesProbBps(after) / 100).toFixed(0)}¢`);
 }
 
@@ -278,9 +278,10 @@ async function cmdClaim(): Promise<void> {
 (async () => {
   switch (CMD) {
     case "list": await cmdList(); break;
-    case "bet": await cmdBet(); break;
+    case "buy":
+    case "bet": await cmdBet(); break; // "bet" kept as a back-compat alias
     case "positions": await cmdPositions(); break;
     case "claim": await cmdClaim(); break;
-    default: fatal(`unknown command "${CMD}" — use list | bet | positions | claim`);
+    default: fatal(`unknown command "${CMD}" — use list | buy | positions | claim`);
   }
 })().catch((e) => fatal(e?.shortMessage ?? e?.message ?? String(e)));
