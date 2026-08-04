@@ -180,6 +180,36 @@ const account = privateKeyToAccount(AGENT_PK);
 const publicClient = createPublicClient({ chain: arcTestnet, transport: http(RPC) });
 const walletClient = createWalletClient({ account, chain: arcTestnet, transport: http(RPC) });
 
+// v0.9.2 — the default public Arc endpoint enforces a small per-IP credit
+// budget on eth_call: transient 429s / "Request exceeds defined limit" are
+// NORMAL there, and one blip must not kill a live agent (a boot-time blip
+// previously exited the CLI before the first tick). Retry with backoff and,
+// if the endpoint stays closed, exit with instructions instead of a raw error.
+const RATE_LIMIT_RE = /rate limit|exceeds defined limit|-32005|-32003|\b429\b/i;
+async function withRpcRetry<T>(label: string, fn: () => Promise<T>): Promise<T> {
+  const delays = [2_000, 5_000, 12_000];
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await fn();
+    } catch (e: any) {
+      const msg = String(e?.shortMessage ?? e?.message ?? e);
+      if (!RATE_LIMIT_RE.test(msg) || attempt >= delays.length) {
+        if (RATE_LIMIT_RE.test(msg)) {
+          throw new Error(
+            `the RPC endpoint is rate-limiting this IP (${label}). The default ` +
+            `public endpoint has a small shared per-IP budget — pass --rpc <url> ` +
+            `or set RPC= to your own Arc Testnet endpoint (a free QuikNode/` +
+            `Alchemy tier is plenty for one agent).`,
+          );
+        }
+        throw e;
+      }
+      log(`${C.yellow}rpc rate-limited (${label}) — retry ${attempt + 1}/${delays.length} in ${delays[attempt] / 1000}s${C.reset}`);
+      await sleep(delays[attempt]);
+    }
+  }
+}
+
 // ─── LLM (optional) ─────────────────────────────────────────────────
 let userStrategyPrompt = "";
 if (PROMPT_PATH) {
@@ -203,7 +233,7 @@ const llm: LlmClient | null =
     : null;
 
 // ─── Banner ─────────────────────────────────────────────────────────
-log(`${C.cyan}NeoArch Arena Player${C.reset} v0.9.1`); // keep in sync with package.json
+log(`${C.cyan}NeoArch Arena Player${C.reset} v0.9.2`); // keep in sync with package.json
 log(`  agent:    ${C.bold}${account.address}${C.reset}`);
 log(`  key:      ${KEY_SOURCE}`);
 log(`  round:    ${ROUND_ADDRESS}`);
@@ -383,12 +413,12 @@ function computeStrategyHash(): Hex {
 
 // ─── Snapshot reader ────────────────────────────────────────────────
 async function readSnapshot(): Promise<AgentSnapshot> {
-  const result = (await publicClient.readContract({
+  const result = (await withRpcRetry("agent snapshot", () => publicClient.readContract({
     address: ROUND_ADDRESS,
     abi: atrRoundAbi,
     functionName: "agents",
     args: [account.address],
-  })) as readonly [
+  }))) as readonly [
     boolean, bigint, bigint, bigint, number, bigint, bigint, number, bigint, bigint, number, Hex, number,
   ];
   const throughputCap = result[6];
@@ -421,11 +451,11 @@ async function readSnapshot(): Promise<AgentSnapshot> {
 }
 
 async function readTiming(): Promise<{ status: number; tick: bigint; lastTs: bigint }> {
-  const [status, tick, lastTs] = (await Promise.all([
+  const [status, tick, lastTs] = (await withRpcRetry("round timing", () => Promise.all([
     publicClient.readContract({ address: ROUND_ADDRESS, abi: atrRoundAbi, functionName: "roundStatus" }),
     publicClient.readContract({ address: ROUND_ADDRESS, abi: atrRoundAbi, functionName: "currentTick" }),
     publicClient.readContract({ address: ROUND_ADDRESS, abi: atrRoundAbi, functionName: "lastTickTimestamp" }),
-  ])) as [number, bigint, bigint];
+  ]))) as [number, bigint, bigint];
   return { status, tick, lastTs };
 }
 

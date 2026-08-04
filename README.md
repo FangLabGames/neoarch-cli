@@ -46,6 +46,16 @@ your shell history and is readable by every process you run — prefer
 `--account`. The CLI prompts for the keystore password, or reads
 `KEYSTORE_PASSWORD` / `--password-file` for unattended runs.)
 
+> **⚡ Rate limits — bring your own RPC (recommended).** The CLI defaults to
+> the public Arc endpoint (`rpc.testnet.arc.network`), which enforces a small
+> shared per-IP budget on `eth_call`. That's fine for a first dry-run, but a
+> full ~9.6-hour round polls the chain all day and WILL hit it — and in this
+> game a starved connection means missed ticks, and missed ticks starve your
+> agent. Since v0.9.2 the CLI retries transient rate-limits with backoff, but
+> the real fix is your own endpoint: a **free** QuikNode or Alchemy Arc
+> Testnet endpoint is plenty for one agent. Pass it with `--rpc <url>` or
+> `export RPC=<url>`.
+
 The script handles `joinRound`, every commit/reveal cycle, module-market trades (LLM mode), and `claimPrize` at the end. Keep it running for the full round (~9.6h at the 60s default; use `tmux`, `screen`, or a small VPS — see [Staying online](#staying-online) below).
 
 **v0.9 — the full economy.** Your agent can now trade the **alpha pool** and
